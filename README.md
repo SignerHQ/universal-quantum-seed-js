@@ -102,16 +102,24 @@ const hSs2 = uqs.hybridKemDecaps(hybridKemKp.sk, hCt);
 | Function | Description |
 |----------|-------------|
 | `mlKeygen(seed)` | Generate signing keypair (SK: 4032B, PK: 1952B) |
-| `mlSign(msg, sk, ctx?)` | Sign message (3309B signature) |
-| `mlVerify(msg, sig, pk, ctx?)` | Verify signature |
+| `mlSign(msg, sk, opts?)` | Sign raw message — interoperable with ACVP/KAT vectors |
+| `mlVerify(msg, sig, pk)` | Verify raw message signature |
+| `mlSignWithContext(msg, sk, ctx?, opts?)` | Sign with FIPS 204 context prefix |
+| `mlVerifyWithContext(msg, sig, pk, ctx?)` | Verify with FIPS 204 context prefix |
+| `mlSignAsync(msg, sk, opts?)` | Async sign (yields to event loop) |
+| `mlVerifyAsync(msg, sig, pk)` | Async verify (yields to event loop) |
 
 **SLH-DSA-SHAKE-128s** (FIPS 205 — Hash-Based Signature)
 
 | Function | Description |
 |----------|-------------|
 | `slhKeygen(seed)` | Generate signing keypair (SK: 64B, PK: 32B) |
-| `slhSign(msg, sk, ctx?)` | Sign message (7856B signature) |
-| `slhVerify(msg, sig, pk, ctx?)` | Verify signature |
+| `slhSign(msg, sk, opts?)` | Sign raw message — interoperable with ACVP/KAT vectors |
+| `slhVerify(msg, sig, pk)` | Verify raw message signature |
+| `slhSignWithContext(msg, sk, ctx?, opts?)` | Sign with FIPS 205 context prefix |
+| `slhVerifyWithContext(msg, sig, pk, ctx?)` | Verify with FIPS 205 context prefix |
+| `slhSignAsync(msg, sk, opts?)` | Async sign (yields to event loop) |
+| `slhVerifyAsync(msg, sig, pk)` | Async verify (yields to event loop) |
 
 **ML-KEM-768** (FIPS 203 — Key Encapsulation)
 
@@ -138,7 +146,7 @@ const hSs2 = uqs.hybridKemDecaps(hybridKemKp.sk, hCt);
 
 **Hybrid Ed25519 + ML-DSA-65** (Classical + Post-Quantum Signature)
 
-Security holds as long as *either* Ed25519 or ML-DSA-65 remains unbroken. Both signatures must independently verify (AND-composition). Ed25519 signs a domain-prefixed message for stripping resistance.
+Security holds as long as *either* Ed25519 or ML-DSA-65 remains unbroken. Both signatures must independently verify (AND-composition). Both components sign the same domain-prefixed message for stripping resistance.
 
 | Function | Description |
 |----------|-------------|
@@ -210,9 +218,16 @@ python tools/compile-js.py
 - **Browsers** — Any browser with BigInt support (Chrome 67+, Firefox 68+, Safari 14+)
 - Uses `crypto.getRandomValues()` (browser) or `crypto.randomBytes()` (Node.js) for entropy
 
+**Argon2id** (RFC 9106 — Memory-Hard KDF)
+
+| Function | Description |
+|----------|-------------|
+| `argon2id(password, salt, timeCost, memoryCost, parallelism, hashLen)` | Argon2id key derivation |
+| `blake2b(data, outLen)` | Blake2b hash function |
+
 ## Note on KDF
 
-The JavaScript edition uses PBKDF2-SHA512 with 600,000 iterations for key derivation. The Python edition additionally supports Argon2id (which requires native bindings). PBKDF2 produces identical outputs cross-platform and is suitable for production use.
+The JavaScript edition includes both PBKDF2-SHA512 (600,000 iterations) and Argon2id (pure JavaScript) for key derivation. Both produce identical outputs cross-platform.
 
 ## License
 

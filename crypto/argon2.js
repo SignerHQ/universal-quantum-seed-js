@@ -308,6 +308,24 @@ function argon2id(password, salt, timeCost, memoryCost, parallelism, hashLen) {
   if (salt instanceof ArrayBuffer) salt = new Uint8Array(salt);
   if (!(password instanceof Uint8Array)) throw new Error("password must be Uint8Array");
   if (!(salt instanceof Uint8Array)) throw new Error("salt must be Uint8Array");
+  if (!Number.isInteger(timeCost) || timeCost < 1) {
+    throw new Error("argon2id: timeCost must be a positive integer, got " + timeCost);
+  }
+  if (!Number.isInteger(memoryCost) || memoryCost < 8) {
+    throw new Error("argon2id: memoryCost must be >= 8 KiB, got " + memoryCost);
+  }
+  if (memoryCost > 4194304) {
+    throw new Error("argon2id: memoryCost exceeds 4 GiB limit (" + memoryCost + " KiB)");
+  }
+  if (!Number.isInteger(parallelism) || parallelism < 1) {
+    throw new Error("argon2id: parallelism must be a positive integer, got " + parallelism);
+  }
+  if (!Number.isInteger(hashLen) || hashLen < 4) {
+    throw new Error("argon2id: hashLen must be >= 4, got " + hashLen);
+  }
+  if (salt.length < 8) {
+    throw new Error("argon2id: salt must be >= 8 bytes, got " + salt.length);
+  }
 
   const p = parallelism, m = memoryCost, t = timeCost, T = hashLen;
 
@@ -353,7 +371,15 @@ function argon2id(password, salt, timeCost, memoryCost, parallelism, hashLen) {
     for (let i = 0; i < BLOCK_U32; i++) finalBlock[i] ^= memory[off + i];
   }
 
-  return argon2Hash(storeBlock(finalBlock, 0), T);
+  const result = argon2Hash(storeBlock(finalBlock, 0), T);
+
+  // Best-effort cleanup of sensitive memory
+  memory.fill(0);
+  finalBlock.fill(0);
+  _R.fill(0);
+  _tmp.fill(0);
+
+  return result;
 }
 
 module.exports = { argon2id, blake2b };

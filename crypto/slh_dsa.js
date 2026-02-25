@@ -23,8 +23,8 @@
  *
  * Public API:
  *     slhKeygen(seed)              -> { sk, pk }
- *     slhSign(msg, sk, ctx)        -> Uint8Array sig (7856 bytes)
- *     slhVerify(msg, sig, pk, ctx) -> bool
+ *     slhSign(msg, sk, opts?)       -> Uint8Array sig (7856 bytes)
+ *     slhVerify(msg, sig, pk)      -> bool
  *
  * Notes:
  *     - Messages are byte-aligned (Uint8Array). Bit-level granularity is not
@@ -986,21 +986,55 @@ function _slh_verify_internal(message, sig_bytes, pk_bytes) {
 }
 
 /**
- * SLH-DSA-SHAKE-128s pure signing (Algorithm 22, FIPS 205).
+ * SLH-DSA-SHAKE-128s standard signing — signs raw message bytes directly.
  *
- * Builds M' = 0x00 || len(ctx) || ctx || message, then calls the
- * internal signing algorithm. This is the FIPS 205 "pure" mode.
- *
- * Defaults to hedged signing (FIPS 205 recommended). Pass
- * deterministic=true for reproducible signatures.
+ * This is the interoperable API that matches ACVP/KAT test vectors and
+ * other SLH-DSA implementations. The message is passed to the internal
+ * algorithm without any preprocessing.
  *
  * @param {Uint8Array} message - Arbitrary-length message bytes
  * @param {Uint8Array} sk - 64-byte secret key from slhKeygen
- * @param {Uint8Array} [ctx=new Uint8Array(0)] - Optional context string (0-255 bytes)
  * @param {{ deterministic?: boolean, addrnd?: Uint8Array }} [opts={}] - Options
  * @returns {Uint8Array} Signature bytes (7,856 bytes)
  */
-function slhSign(message, sk, ctx, opts) {
+function slhSign(message, sk, opts) {
+  message = toBytes(message);
+  if (opts === undefined || opts === null) opts = {};
+  return _slh_sign_internal(
+    message,
+    sk,
+    opts.addrnd != null ? opts.addrnd : null,
+    !!opts.deterministic
+  );
+}
+
+/**
+ * SLH-DSA-SHAKE-128s standard verification — verifies against raw message.
+ *
+ * @param {Uint8Array} message - Original message bytes
+ * @param {Uint8Array} sig - Signature from slhSign
+ * @param {Uint8Array} pk - 32-byte public key from slhKeygen
+ * @returns {boolean} True if valid, false otherwise
+ */
+function slhVerify(message, sig, pk) {
+  message = toBytes(message);
+  return _slh_verify_internal(message, sig, pk);
+}
+
+/**
+ * SLH-DSA-SHAKE-128s signing with FIPS 205 context prefix.
+ *
+ * Builds M' = 0x00 || len(ctx) || ctx || message, then calls the
+ * internal signing algorithm. Use slhSign() for the standard
+ * interoperable API (no context prefix).
+ *
+ * @param {Uint8Array} message - Arbitrary-length message bytes
+ * @param {Uint8Array} sk - 64-byte secret key from slhKeygen
+ * @param {Uint8Array} [ctx=new Uint8Array(0)] - Context string (0-255 bytes)
+ * @param {{ deterministic?: boolean, addrnd?: Uint8Array }} [opts={}] - Options
+ * @returns {Uint8Array} Signature bytes (7,856 bytes)
+ */
+function slhSignWithContext(message, sk, ctx, opts) {
   message = toBytes(message);
   if (ctx === undefined || ctx === null) ctx = new Uint8Array(0);
   else ctx = toBytes(ctx);
@@ -1022,18 +1056,17 @@ function slhSign(message, sk, ctx, opts) {
 }
 
 /**
- * SLH-DSA-SHAKE-128s pure verification (Algorithm 24, FIPS 205).
+ * SLH-DSA-SHAKE-128s verification with FIPS 205 context prefix.
  *
- * Builds M' = 0x00 || len(ctx) || ctx || message, then calls the
- * internal verification algorithm. This is the FIPS 205 "pure" mode.
+ * Use slhVerify() for the standard interoperable API (no context prefix).
  *
  * @param {Uint8Array} message - Original message bytes
- * @param {Uint8Array} sig - Signature from slhSign
+ * @param {Uint8Array} sig - Signature from slhSignWithContext
  * @param {Uint8Array} pk - 32-byte public key from slhKeygen
- * @param {Uint8Array} [ctx=new Uint8Array(0)] - Optional context string (must match signing)
+ * @param {Uint8Array} [ctx=new Uint8Array(0)] - Context string
  * @returns {boolean} True if valid, false otherwise
  */
-function slhVerify(message, sig, pk, ctx) {
+function slhVerifyWithContext(message, sig, pk, ctx) {
   message = toBytes(message);
   if (ctx === undefined || ctx === null) ctx = new Uint8Array(0);
   else ctx = toBytes(ctx);
@@ -1046,11 +1079,40 @@ function slhVerify(message, sig, pk, ctx) {
   return _slh_verify_internal(m_prime, sig, pk);
 }
 
+/**
+ * Async wrapper for slhSign — yields to the event loop before computation
+ * so browser UIs don't freeze. SLH-DSA signing is particularly heavy.
+ */
+function slhSignAsync(message, sk, opts) {
+  return new Promise(function (resolve, reject) {
+    setTimeout(function () {
+      try { resolve(slhSign(message, sk, opts)); }
+      catch (e) { reject(e); }
+    }, 0);
+  });
+}
+
+/**
+ * Async wrapper for slhVerify — yields to the event loop before computation.
+ */
+function slhVerifyAsync(message, sig, pk) {
+  return new Promise(function (resolve, reject) {
+    setTimeout(function () {
+      try { resolve(slhVerify(message, sig, pk)); }
+      catch (e) { reject(e); }
+    }, 0);
+  });
+}
+
 
 module.exports = {
   slhKeygen,
   slhSign,
   slhVerify,
+  slhSignWithContext,
+  slhVerifyWithContext,
+  slhSignAsync,
+  slhVerifyAsync,
 
   // Expose sizes for consumers
   SIG_SIZE: _SIG_SIZE,

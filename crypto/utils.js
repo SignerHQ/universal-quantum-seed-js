@@ -9,6 +9,7 @@ function toBytes(data) {
   if (data instanceof Uint8Array) return data;
   if (typeof data === "string") return new TextEncoder().encode(data);
   if (Array.isArray(data)) return new Uint8Array(data);
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
   if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
   throw new Error("unsupported input type");
 }

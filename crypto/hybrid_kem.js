@@ -25,7 +25,7 @@
 const { x25519Keygen, x25519 } = require("./x25519");
 const { mlKemKeygen, mlKemEncaps, mlKemDecaps } = require("./ml_kem");
 const { sha256, hmacSha256 } = require("./sha2");
-const { randomBytes } = require("./utils");
+const { randomBytes, zeroize } = require("./utils");
 
 // Component sizes
 const _X25519_SK = 32;
@@ -65,7 +65,13 @@ function _combineSecrets(x25519Ss, mlKemSs, x25519Ct, mlKemCt) {
     0x65, 0x6d, 0x2d, 0x76, 0x31, // "em-v1"
     0x01, // counter byte
   ]);
-  return hmacSha256(prk, info);
+  const ss = hmacSha256(prk, info);
+
+  // Best-effort cleanup of intermediate secrets
+  zeroize(ssConcat);
+  zeroize(prk);
+
+  return ss;
 }
 
 /**
@@ -127,6 +133,11 @@ function hybridKemEncaps(ek, randomnessIn) {
 
   const ss = _combineSecrets(xSs, mlResult.ss, eph.pk, mlResult.ct);
 
+  // Best-effort cleanup of component shared secrets
+  zeroize(xSs);
+  zeroize(mlResult.ss);
+  zeroize(eph.sk);
+
   return { ct, ss };
 }
 
@@ -163,7 +174,13 @@ function hybridKemDecaps(dk, ct) {
   const mlSs = mlKemDecaps(mlDk, mlCt);
 
   // Combine shared secrets with ciphertext binding
-  return _combineSecrets(xSs, mlSs, ephPk, mlCt);
+  const ss = _combineSecrets(xSs, mlSs, ephPk, mlCt);
+
+  // Best-effort cleanup of component shared secrets
+  zeroize(xSs);
+  zeroize(mlSs);
+
+  return ss;
 }
 
 module.exports = {

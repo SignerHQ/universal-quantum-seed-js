@@ -317,6 +317,13 @@ function pbkdf2Sha512(password, salt, iterations, dkLen) {
   password = toBytes(password);
   salt = toBytes(salt);
 
+  if (!Number.isInteger(iterations) || iterations < 1) {
+    throw new Error("pbkdf2: iterations must be a positive integer, got " + iterations);
+  }
+  if (!Number.isInteger(dkLen) || dkLen < 1) {
+    throw new Error("pbkdf2: dkLen must be a positive integer, got " + dkLen);
+  }
+
   if (_nativePbkdf2) return _nativePbkdf2(password, salt, iterations, dkLen);
 
   const hashLen = 64;
@@ -354,6 +361,7 @@ function toBytes(data) {
   if (data instanceof Uint8Array) return data;
   if (typeof data === "string") return new TextEncoder().encode(data);
   if (Array.isArray(data)) return new Uint8Array(data);
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
   if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
   throw new Error("sha2: unsupported input type");
 }

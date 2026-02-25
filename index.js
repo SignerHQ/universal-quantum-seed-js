@@ -35,11 +35,19 @@ module.exports = {
   mlKeygen: crypto.mlKeygen,
   mlSign: crypto.mlSign,
   mlVerify: crypto.mlVerify,
+  mlSignWithContext: crypto.mlSignWithContext,
+  mlVerifyWithContext: crypto.mlVerifyWithContext,
+  mlSignAsync: crypto.mlSignAsync,
+  mlVerifyAsync: crypto.mlVerifyAsync,
 
   // SLH-DSA-SHAKE-128s (FIPS 205) — Hash-Based Signature
   slhKeygen: crypto.slhKeygen,
   slhSign: crypto.slhSign,
   slhVerify: crypto.slhVerify,
+  slhSignWithContext: crypto.slhSignWithContext,
+  slhVerifyWithContext: crypto.slhVerifyWithContext,
+  slhSignAsync: crypto.slhSignAsync,
+  slhVerifyAsync: crypto.slhVerifyAsync,
 
   // ML-KEM-768 (FIPS 203) — Key Encapsulation
   mlKemKeygen: crypto.mlKemKeygen,
@@ -64,6 +72,10 @@ module.exports = {
   hybridKemKeygen: crypto.hybridKemKeygen,
   hybridKemEncaps: crypto.hybridKemEncaps,
   hybridKemDecaps: crypto.hybridKemDecaps,
+
+  // Argon2id (RFC 9106) — Memory-hard KDF
+  argon2id: crypto.argon2id,
+  blake2b: crypto.blake2b,
 
   // ── Hash Functions ─────────────────────────────────────
   sha3_256: crypto.sha3_256,

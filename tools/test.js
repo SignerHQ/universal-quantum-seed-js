@@ -3,7 +3,7 @@
 "use strict";
 
 // Basic test harness — round-trip tests, edge cases, and cross-checks.
-// Run with: node tests/test.js
+// Run with: node tools/test.js
 
 const crypto = require("../crypto");
 const { toBytes, randomBytes, constantTimeEqual } = require("../crypto/utils");
@@ -125,7 +125,7 @@ section("ML-DSA-65");
   assert(sk.length === 4032, "sk should be 4032 bytes");
   assert(pk.length === 1952, "pk should be 1952 bytes");
 
-  // Round-trip with Uint8Array message
+  // Round-trip with Uint8Array message (raw/interoperable API)
   const msg = new TextEncoder().encode("hello ml-dsa");
   const sig = crypto.mlSign(msg, sk);
   assert(sig.length === 3309, "sig should be 3309 bytes");
@@ -135,25 +135,58 @@ section("ML-DSA-65");
   const sig2 = crypto.mlSign("hello ml-dsa", sk);
   assert(crypto.mlVerify("hello ml-dsa", sig2, pk), "string message should work");
 
-  // Context string
+  // Context string (FIPS 204 pure mode via mlSignWithContext)
   const ctx = new TextEncoder().encode("test-ctx");
-  const sigCtx = crypto.mlSign(msg, sk, ctx);
-  assert(crypto.mlVerify(msg, sigCtx, pk, ctx), "ctx sig should verify with same ctx");
-  assert(!crypto.mlVerify(msg, sigCtx, pk), "ctx sig should fail without ctx");
+  const sigCtx = crypto.mlSignWithContext(msg, sk, ctx);
+  assert(crypto.mlVerifyWithContext(msg, sigCtx, pk, ctx), "ctx sig should verify with same ctx");
+  assert(!crypto.mlVerifyWithContext(msg, sigCtx, pk), "ctx sig should fail without ctx");
 
   // String context
-  const sigCtx2 = crypto.mlSign(msg, sk, "test-ctx");
-  assert(crypto.mlVerify(msg, sigCtx2, pk, "test-ctx"), "string ctx should work");
+  const sigCtx2 = crypto.mlSignWithContext(msg, sk, "test-ctx");
+  assert(crypto.mlVerifyWithContext(msg, sigCtx2, pk, "test-ctx"), "string ctx should work");
+
+  // Raw signature should NOT verify under context mode (and vice versa)
+  assert(!crypto.mlVerifyWithContext(msg, sig, pk, ctx), "raw sig should fail under context verification");
+  assert(!crypto.mlVerify(msg, sigCtx, pk), "context sig should fail under raw verification");
 
   // Deterministic mode
-  const sigDet1 = crypto.mlSign(msg, sk, null, { deterministic: true });
-  const sigDet2 = crypto.mlSign(msg, sk, null, { deterministic: true });
+  const sigDet1 = crypto.mlSign(msg, sk, { deterministic: true });
+  const sigDet2 = crypto.mlSign(msg, sk, { deterministic: true });
   assert(constantTimeEqual(sigDet1, sigDet2), "deterministic sigs should be identical");
 
   // Tampered
   assert(!crypto.mlVerify(new TextEncoder().encode("tampered"), sig, pk), "tampered msg should fail");
 
   console.log("  ML-DSA-65 round-trip: OK");
+})();
+
+// ── ML-DSA-65 Async ───────────────────────────────────────────────
+
+section("ML-DSA-65 Async");
+
+let asyncDone = false;
+
+(async () => {
+  try {
+    const seed = randomBytes(32);
+    const { sk, pk } = crypto.mlKeygen(seed);
+    const msg = new TextEncoder().encode("hello ml-dsa-async");
+
+    const sig = await crypto.mlSignAsync(msg, sk);
+    assert(sig.length === 3309, "async sig should be 3309 bytes");
+
+    const valid = await crypto.mlVerifyAsync(msg, sig, pk);
+    assert(valid, "async verify should pass");
+
+    const invalid = await crypto.mlVerifyAsync(new TextEncoder().encode("tampered"), sig, pk);
+    assert(!invalid, "async verify should fail on tampered msg");
+
+    console.log("  ML-DSA-65 Async: OK");
+  } catch (e) {
+    console.error("  FAIL: ML-DSA async exception:", e.message);
+    failed++;
+  }
+  asyncDone = true;
 })();
 
 // ── ML-KEM-768 ────────────────────────────────────────────────────
@@ -212,6 +245,14 @@ section("Hybrid Ed25519 + ML-DSA-65");
   // Tampered
   assert(!crypto.hybridDsaVerify(new TextEncoder().encode("tampered"), sig, pk), "tampered should fail");
 
+  // Verify stripping resistance: neither component should work standalone
+  const edSig = sig.subarray(0, 64);
+  const mlSig = sig.subarray(64);
+  const edPk = pk.subarray(0, 32);
+  const mlPk = pk.subarray(32);
+  assert(!crypto.ed25519Verify(msg, edSig, edPk), "Ed25519 component should not verify standalone (domain-prefixed)");
+  assert(!crypto.mlVerify(msg, mlSig, mlPk), "ML-DSA component should not verify standalone (domain-prefixed)");
+
   console.log("  Hybrid DSA round-trip: OK");
 })();
 
@@ -232,7 +273,7 @@ section("Hybrid X25519 + ML-KEM-768");
   const ssDec = crypto.hybridKemDecaps(dk, ct);
   assert(constantTimeEqual(ssEnc, ssDec), "encaps/decaps shared secrets should match");
 
-  // Tampered X25519 part of ciphertext — should not throw (fix 2)
+  // Tampered X25519 part of ciphertext — should not throw
   const badCt = new Uint8Array(ct);
   badCt[0] ^= 0xff; // tamper X25519 ephemeral pk
   try {
@@ -259,6 +300,12 @@ section("SHA-3 / SHAKE");
   const h2 = crypto.sha3_256("abc");
   assert(h2.length === 32, "sha3-256 of string should work");
 
+  // ArrayBuffer input
+  const abuf = new ArrayBuffer(3);
+  new Uint8Array(abuf).set([0x61, 0x62, 0x63]); // "abc"
+  const h3 = crypto.sha3_256(abuf);
+  assert(constantTimeEqual(h2, h3), "sha3-256 of ArrayBuffer should match string");
+
   // SHAKE determinism
   const s1 = crypto.shake256(new Uint8Array([1, 2, 3]), 64);
   const s2 = crypto.shake256(new Uint8Array([1, 2, 3]), 64);
@@ -269,6 +316,61 @@ section("SHA-3 / SHAKE");
   assert(constantTimeEqual(s1, long.subarray(0, 64)), "SHAKE output should be prefix-consistent");
 
   console.log("  SHA-3/SHAKE: OK");
+})();
+
+// ── Argon2id ────────────────────────────────────────────────────
+
+section("Argon2id");
+
+(() => {
+  // Basic round-trip: argon2id should return hashLen bytes
+  const password = new TextEncoder().encode("password");
+  const salt = new TextEncoder().encode("saltsalt"); // 8 bytes min
+  const hash = crypto.argon2id(password, salt, 1, 64, 1, 32);
+  assert(hash instanceof Uint8Array, "argon2id should return Uint8Array");
+  assert(hash.length === 32, "argon2id hash should be 32 bytes");
+
+  // Deterministic: same input -> same output
+  const hash2 = crypto.argon2id(password, salt, 1, 64, 1, 32);
+  assert(constantTimeEqual(hash, hash2), "argon2id should be deterministic");
+
+  // Different password -> different hash
+  const hash3 = crypto.argon2id(new TextEncoder().encode("other"), salt, 1, 64, 1, 32);
+  assert(!constantTimeEqual(hash, hash3), "different password should produce different hash");
+
+  // Input validation
+  try { crypto.argon2id(password, salt, 0, 64, 1, 32); assert(false, "timeCost=0 should throw"); }
+  catch (_) { assert(true, "timeCost=0 throws"); }
+
+  try { crypto.argon2id(password, salt, 1, 4, 1, 32); assert(false, "memoryCost=4 should throw"); }
+  catch (_) { assert(true, "memoryCost too low throws"); }
+
+  try { crypto.argon2id(password, new Uint8Array(4), 1, 64, 1, 32); assert(false, "short salt should throw"); }
+  catch (_) { assert(true, "short salt throws"); }
+
+  console.log("  Argon2id: OK");
+})();
+
+// ── PBKDF2 Validation ────────────────────────────────────────────
+
+section("PBKDF2 Validation");
+
+(() => {
+  // Input validation
+  try { crypto.pbkdf2Sha512("pass", "salt", 0, 32); assert(false, "iterations=0 should throw"); }
+  catch (_) { assert(true, "iterations=0 throws"); }
+
+  try { crypto.pbkdf2Sha512("pass", "salt", 1, 0); assert(false, "dkLen=0 should throw"); }
+  catch (_) { assert(true, "dkLen=0 throws"); }
+
+  try { crypto.pbkdf2Sha512("pass", "salt", -1, 32); assert(false, "iterations=-1 should throw"); }
+  catch (_) { assert(true, "iterations=-1 throws"); }
+
+  // Basic round-trip
+  const dk = crypto.pbkdf2Sha512("password", "salt", 1, 64);
+  assert(dk instanceof Uint8Array && dk.length === 64, "pbkdf2 should return 64 bytes");
+
+  console.log("  PBKDF2 validation: OK");
 })();
 
 // ── toBytes normalization ─────────────────────────────────────────
@@ -290,11 +392,17 @@ section("toBytes normalization");
   const c = new Uint8Array([4, 5]);
   assert(toBytes(c) === c, "Uint8Array should pass through");
 
+  // ArrayBuffer
+  const abuf = new ArrayBuffer(3);
+  new Uint8Array(abuf).set([10, 20, 30]);
+  const d = toBytes(abuf);
+  assert(d instanceof Uint8Array && d[0] === 10 && d[1] === 20 && d[2] === 30, "ArrayBuffer should convert");
+
   // ArrayBuffer view
   const buf = new ArrayBuffer(4);
   new Uint8Array(buf)[0] = 42;
-  const d = toBytes(new DataView(buf));
-  assert(d instanceof Uint8Array && d[0] === 42, "ArrayBuffer view should convert");
+  const e = toBytes(new DataView(buf));
+  assert(e instanceof Uint8Array && e[0] === 42, "ArrayBuffer view should convert");
 
   // Unsupported type
   try {
@@ -309,8 +417,12 @@ section("toBytes normalization");
 
 // ── Summary ───────────────────────────────────────────────────────
 
-console.log(`\n═══════════════════════════════════════`);
-console.log(`  ${passed} passed, ${failed} failed`);
-console.log(`═══════════════════════════════════════\n`);
-
-process.exit(failed > 0 ? 1 : 0);
+// Wait for async tests to complete before printing summary
+function printSummary() {
+  if (!asyncDone) { setTimeout(printSummary, 100); return; }
+  console.log(`\n═══════════════════════════════════════`);
+  console.log(`  ${passed} passed, ${failed} failed`);
+  console.log(`═══════════════════════════════════════\n`);
+  process.exit(failed > 0 ? 1 : 0);
+}
+setTimeout(printSummary, 100);

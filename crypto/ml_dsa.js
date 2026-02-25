@@ -21,9 +21,11 @@
 // Reference: NIST FIPS 204 (August 2024).
 //
 // Public API:
-//     mlKeygen(seed)              -> {sk, pk}     (seed: 32-byte Uint8Array)
-//     mlSign(msg, sk, ctx, opts)  -> Uint8Array    (3,309-byte signature)
-//     mlVerify(msg, sig, pk, ctx) -> bool
+//     mlKeygen(seed)                    -> {sk, pk}     (seed: 32-byte Uint8Array)
+//     mlSign(msg, sk, opts?)            -> Uint8Array    (3,309-byte signature, raw/interoperable)
+//     mlVerify(msg, sig, pk)            -> bool          (raw/interoperable)
+//     mlSignWithContext(msg, sk, ctx, opts?)  -> Uint8Array (FIPS 204 pure mode with context)
+//     mlVerifyWithContext(msg, sig, pk, ctx)  -> bool
 //
 // Notes:
 //     - All arithmetic uses regular JavaScript Number (q=8380417 fits in 53-bit
@@ -948,7 +950,7 @@ function mlSignInternal(message, skBytes, rnd, deterministic) {
         }
       }
     }
-    if (reject) continue;
+    if (reject) { zeroizeVec(y); continue; }
 
     // 6h: Check ||r0||_inf < gamma2 - beta
     for (let i = 0; i < K && !reject; i++) {
@@ -960,7 +962,7 @@ function mlSignInternal(message, skBytes, rnd, deterministic) {
         }
       }
     }
-    if (reject) continue;
+    if (reject) { zeroizeVec(y); continue; }
 
     // 6i: Compute hint h
     const ct0 = new Array(K);
@@ -978,7 +980,7 @@ function mlSignInternal(message, skBytes, rnd, deterministic) {
         hintCount += h[i][j];
       }
     }
-    if (hintCount > OMEGA) continue;
+    if (hintCount > OMEGA) { zeroizeVec(y); continue; }
 
     // 6j: Check ct0 norm bound
     reject = false;
@@ -992,12 +994,13 @@ function mlSignInternal(message, skBytes, rnd, deterministic) {
         }
       }
     }
-    if (reject) continue;
+    if (reject) { zeroizeVec(y); continue; }
 
     // Success -- encode signature
     const sig = sigEncode(cTilde, z, h);
 
     // Best-effort cleanup of secret intermediates
+    zeroizeVec(y);
     zeroizeVec(s1);
     zeroizeVec(s2);
     zeroizeVec(s1Hat);
@@ -1118,21 +1121,59 @@ function mlVerifyInternal(message, sigBytes, pkBytes) {
 }
 
 /**
- * ML-DSA-65 pure signing (Algorithm 2, FIPS 204).
+ * ML-DSA-65 standard signing — signs raw message bytes directly.
  *
- * Builds M' = 0x00 || len(ctx) || ctx || message, then calls the
- * internal signing algorithm. This is the FIPS 204 "pure" mode.
+ * This is the interoperable API that matches ACVP/KAT test vectors and
+ * other ML-DSA implementations (BoringSSL, liboqs, etc.). The message
+ * is passed to the internal algorithm without any preprocessing.
  *
  * Defaults to hedged signing (FIPS 204 recommended). Pass
  * deterministic:true for reproducible signatures.
  *
  * @param {Uint8Array} message - Arbitrary-length message bytes.
  * @param {Uint8Array} sk - 4,032-byte secret key from mlKeygen.
- * @param {Uint8Array} [ctx=new Uint8Array(0)] - Optional context string (0-255 bytes).
  * @param {Object} [opts] - Options: {deterministic: bool, rnd: Uint8Array|null}.
  * @returns {Uint8Array} Signature bytes (3,309 bytes for ML-DSA-65).
  */
-function mlSign(message, sk, ctx, opts) {
+function mlSign(message, sk, opts) {
+  message = toBytes(message);
+  if (opts === undefined) opts = {};
+  return mlSignInternal(message, sk, opts.rnd || null, !!opts.deterministic);
+}
+
+/**
+ * ML-DSA-65 standard verification — verifies against raw message bytes.
+ *
+ * This is the interoperable API that matches ACVP/KAT test vectors and
+ * other ML-DSA implementations.
+ *
+ * @param {Uint8Array} message - Original message bytes.
+ * @param {Uint8Array} sig - Signature bytes from mlSign.
+ * @param {Uint8Array} pk - Public key bytes from mlKeygen.
+ * @returns {boolean} True if the signature is valid, false otherwise.
+ */
+function mlVerify(message, sig, pk) {
+  message = toBytes(message);
+  return mlVerifyInternal(message, sig, pk);
+}
+
+/**
+ * ML-DSA-65 pure signing with context (Algorithm 2, FIPS 204).
+ *
+ * Builds M' = 0x00 || len(ctx) || ctx || message, then calls the
+ * internal signing algorithm. This is the FIPS 204 "pure" mode with
+ * context string support.
+ *
+ * Use mlSign() for the standard interoperable API (no context prefix).
+ * Use this function only when FIPS 204 context strings are required.
+ *
+ * @param {Uint8Array} message - Arbitrary-length message bytes.
+ * @param {Uint8Array} sk - 4,032-byte secret key from mlKeygen.
+ * @param {Uint8Array} [ctx=new Uint8Array(0)] - Context string (0-255 bytes).
+ * @param {Object} [opts] - Options: {deterministic: bool, rnd: Uint8Array|null}.
+ * @returns {Uint8Array} Signature bytes (3,309 bytes for ML-DSA-65).
+ */
+function mlSignWithContext(message, sk, ctx, opts) {
   message = toBytes(message);
   if (ctx === undefined || ctx === null) ctx = new Uint8Array(0);
   else ctx = toBytes(ctx);
@@ -1149,18 +1190,20 @@ function mlSign(message, sk, ctx, opts) {
 }
 
 /**
- * ML-DSA-65 pure verification (Algorithm 3, FIPS 204).
+ * ML-DSA-65 pure verification with context (Algorithm 3, FIPS 204).
  *
  * Builds M' = 0x00 || len(ctx) || ctx || message, then calls the
  * internal verification algorithm. This is the FIPS 204 "pure" mode.
  *
+ * Use mlVerify() for the standard interoperable API (no context prefix).
+ *
  * @param {Uint8Array} message - Original message bytes.
- * @param {Uint8Array} sig - Signature bytes from mlSign.
+ * @param {Uint8Array} sig - Signature bytes from mlSignWithContext.
  * @param {Uint8Array} pk - Public key bytes from mlKeygen.
- * @param {Uint8Array} [ctx=new Uint8Array(0)] - Optional context string.
+ * @param {Uint8Array} [ctx=new Uint8Array(0)] - Context string.
  * @returns {boolean} True if the signature is valid, false otherwise.
  */
-function mlVerify(message, sig, pk, ctx) {
+function mlVerifyWithContext(message, sig, pk, ctx) {
   message = toBytes(message);
   if (ctx === undefined || ctx === null) ctx = new Uint8Array(0);
   else ctx = toBytes(ctx);
@@ -1173,10 +1216,39 @@ function mlVerify(message, sig, pk, ctx) {
   return mlVerifyInternal(mPrime, sig, pk);
 }
 
+/**
+ * Async wrapper for mlSign — yields to the event loop before computation
+ * so browser UIs don't freeze. Uses the same algorithm as the sync version.
+ */
+function mlSignAsync(message, sk, opts) {
+  return new Promise(function (resolve, reject) {
+    setTimeout(function () {
+      try { resolve(mlSign(message, sk, opts)); }
+      catch (e) { reject(e); }
+    }, 0);
+  });
+}
+
+/**
+ * Async wrapper for mlVerify — yields to the event loop before computation.
+ */
+function mlVerifyAsync(message, sig, pk) {
+  return new Promise(function (resolve, reject) {
+    setTimeout(function () {
+      try { resolve(mlVerify(message, sig, pk)); }
+      catch (e) { reject(e); }
+    }, 0);
+  });
+}
+
 module.exports = {
   mlKeygen,
   mlSign,
   mlVerify,
+  mlSignWithContext,
+  mlVerifyWithContext,
+  mlSignAsync,
+  mlVerifyAsync,
   // Expose sizes for callers
   PK_SIZE,
   SK_SIZE,

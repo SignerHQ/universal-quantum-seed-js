@@ -16,7 +16,7 @@
 // Falls back to pure JavaScript BigInt arithmetic (NOT constant-time).
 
 const { sha512 } = require("./sha2");
-const { toBytes } = require("./utils");
+const { toBytes, zeroize } = require("./utils");
 
 // ── Field & Curve Constants ─────────────────────────────────────
 
@@ -322,7 +322,7 @@ function ed25519Sign(message, skBytes) {
 
   const h = sha512(seed);
   const a = bytesToBigIntLE(clamp(h));
-  const prefix = h.subarray(32, 64);
+  const prefix = new Uint8Array(h.subarray(32, 64)); // copy before zeroizing h
 
   // r = SHA-512(prefix || message) mod L
   const rInput = new Uint8Array(prefix.length + message.length);
@@ -349,6 +349,12 @@ function ed25519Sign(message, skBytes) {
     sBytes[i] = Number(ss & 0xffn);
     ss >>= 8n;
   }
+
+  // Best-effort cleanup of secret intermediates
+  // (BigInt scalars a, r, hram cannot be zeroized — JS BigInt is immutable)
+  zeroize(h);
+  zeroize(prefix);
+  zeroize(rInput);
 
   const sig = new Uint8Array(64);
   sig.set(rBytes);

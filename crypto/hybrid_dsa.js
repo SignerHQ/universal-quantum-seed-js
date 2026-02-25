@@ -11,9 +11,9 @@
 // Ed25519 provides classical (pre-quantum) security (~128-bit).
 // ML-DSA-65 provides post-quantum security (NIST Level 3, ~192-bit).
 //
-// Stripping resistance: the Ed25519 component signs a domain-prefixed message
-// ("hybrid-dsa-v1" + len(ctx) + ctx + message), preventing extraction of
-// the Ed25519 signature for standalone use outside the hybrid context.
+// Stripping resistance: both components sign a domain-prefixed message
+// ("hybrid-dsa-v1" || len(ctx) || ctx || message), preventing extraction of
+// either component signature for standalone use outside the hybrid context.
 //
 // Sizes:
 //     Secret key:  4,096 bytes  (Ed25519 sk 64B + ML-DSA-65 sk 4,032B)
@@ -24,7 +24,7 @@
 
 const { ed25519Keygen, ed25519Sign, ed25519Verify } = require("./ed25519");
 const { mlKeygen, mlSign, mlVerify } = require("./ml_dsa");
-const { toBytes } = require("./utils");
+const { toBytes, zeroize } = require("./utils");
 
 // Component sizes
 const _ED25519_SK = 64;
@@ -39,10 +39,12 @@ const HYBRID_DSA_SK_SIZE = _ED25519_SK + _ML_DSA_SK;    // 4,096
 const HYBRID_DSA_PK_SIZE = _ED25519_PK + _ML_DSA_PK;    // 1,984
 const HYBRID_DSA_SIG_SIZE = _ED25519_SIG + _ML_DSA_SIG;  // 3,373
 
-// Domain prefix for stripping resistance
+// Domain prefix for stripping resistance.
+// Both Ed25519 and ML-DSA sign this same domain-prefixed byte string,
+// preventing extraction of either component signature for standalone use.
 const _DOMAIN = new TextEncoder().encode("hybrid-dsa-v1");
 
-function _ed25519Message(message, ctx) {
+function _hybridMessage(message, ctx) {
   if (ctx.length > 255) {
     throw new Error(`Context string must be 0-255 bytes, got ${ctx.length}`);
   }
@@ -98,11 +100,14 @@ function hybridDsaSign(message, sk, ctx) {
   const edSk = sk.subarray(0, _ED25519_SK);
   const mlSk = sk.subarray(_ED25519_SK);
 
-  // Ed25519 signs domain-prefixed message (stripping resistance)
-  const edSig = ed25519Sign(_ed25519Message(message, ctx), edSk);
+  // Both components sign the same domain-prefixed message.
+  // This ensures neither signature can be used standalone outside the hybrid context.
+  const msg = _hybridMessage(message, ctx);
 
-  // ML-DSA signs raw message with its native context parameter
-  const mlSig = mlSign(message, mlSk, ctx);
+  const edSig = ed25519Sign(msg, edSk);
+  const mlSig = mlSign(msg, mlSk);
+
+  zeroize(msg);
 
   const sig = new Uint8Array(HYBRID_DSA_SIG_SIZE);
   sig.set(edSig);
@@ -132,9 +137,10 @@ function hybridDsaVerify(message, sig, pk, ctx) {
   const edPk = pk.subarray(0, _ED25519_PK);
   const mlPk = pk.subarray(_ED25519_PK);
 
-  // Both must verify
-  if (!ed25519Verify(_ed25519Message(message, ctx), edSig, edPk)) return false;
-  if (!mlVerify(message, mlSig, mlPk, ctx)) return false;
+  // Both components verify against the same domain-prefixed message
+  const msg = _hybridMessage(message, ctx);
+  if (!ed25519Verify(msg, edSig, edPk)) return false;
+  if (!mlVerify(msg, mlSig, mlPk)) return false;
 
   return true;
 }
