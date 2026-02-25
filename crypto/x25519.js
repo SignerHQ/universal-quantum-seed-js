@@ -12,7 +12,8 @@
 //     Public key:     32 bytes (u-coordinate of [sk] * basepoint)
 //     Shared secret:  32 bytes
 //
-// NOT constant-time. For side-channel-resistant deployments, use C/Rust.
+// When Node.js crypto is available, uses native X25519 (constant-time OpenSSL).
+// Falls back to pure JavaScript BigInt arithmetic (NOT constant-time).
 
 const P = 2n ** 255n - 19n;
 const A24 = 121665n; // (A - 2) / 4 where A = 486662
@@ -103,6 +104,43 @@ function x25519Raw(kBytes, uBytes) {
   return (x2 * modPow(z2, P - 2n, P)) % P;
 }
 
+// ── Native Node.js X25519 (constant-time via OpenSSL) ───────────
+
+const _X25519_SK_DER_PREFIX = Buffer.from(
+  "302e020100300506032b656e04220420", "hex"
+);
+const _X25519_PK_DER_PREFIX = Buffer.from(
+  "302a300506032b656e032100", "hex"
+);
+
+let _nativeX25519Keygen = null;
+let _nativeX25519DH = null;
+
+try {
+  const nodeCrypto = require("crypto");
+  // Probe: create a test X25519 key
+  const _probe = Buffer.concat([_X25519_SK_DER_PREFIX, Buffer.alloc(32)]);
+  nodeCrypto.createPrivateKey({ key: _probe, format: "der", type: "pkcs8" });
+
+  _nativeX25519Keygen = (sk) => {
+    const der = Buffer.concat([_X25519_SK_DER_PREFIX, Buffer.from(sk)]);
+    const privateKey = nodeCrypto.createPrivateKey({ key: der, format: "der", type: "pkcs8" });
+    const publicKey = nodeCrypto.createPublicKey(privateKey);
+    const pkDer = publicKey.export({ type: "spki", format: "der" });
+    return new Uint8Array(pkDer.subarray(pkDer.length - 32));
+  };
+
+  _nativeX25519DH = (sk, pk) => {
+    const skDer = Buffer.concat([_X25519_SK_DER_PREFIX, Buffer.from(sk)]);
+    const pkDer = Buffer.concat([_X25519_PK_DER_PREFIX, Buffer.from(pk)]);
+    const privateKey = nodeCrypto.createPrivateKey({ key: skDer, format: "der", type: "pkcs8" });
+    const publicKey = nodeCrypto.createPublicKey({ key: pkDer, format: "der", type: "spki" });
+    return new Uint8Array(nodeCrypto.diffieHellman({ privateKey, publicKey }));
+  };
+} catch (_) {
+  // Native X25519 not available — pure JS fallback
+}
+
 // ── Public API ──────────────────────────────────────────────────
 
 function x25519Keygen(seed) {
@@ -111,7 +149,11 @@ function x25519Keygen(seed) {
   }
 
   const sk = clamp(seed);
-  // Base point u = 9
+  if (_nativeX25519Keygen) {
+    const pk = _nativeX25519Keygen(sk);
+    return { sk, pk };
+  }
+  // Pure JS fallback
   const basepoint = new Uint8Array(32);
   basepoint[0] = 9;
   const u = x25519Raw(sk, basepoint);
@@ -127,8 +169,13 @@ function x25519(sk, pk) {
     throw new Error("X25519 pk must be a 32-byte Uint8Array");
   }
 
-  const u = x25519Raw(sk, pk);
-  const result = encodeU(u);
+  let result;
+  if (_nativeX25519DH) {
+    result = _nativeX25519DH(sk, pk);
+  } else {
+    const u = x25519Raw(sk, pk);
+    result = encodeU(u);
+  }
 
   // Reject low-order points (all-zero output) per RFC 7748 Section 6.1
   let allZero = true;

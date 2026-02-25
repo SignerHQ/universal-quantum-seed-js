@@ -305,11 +305,57 @@ class ShakeXof {
   }
 }
 
+// Native-aware XOF wrapper: uses OpenSSL SHAKE when available, otherwise pure JS sponge.
+// The native path re-hashes with doubling strategy (O(n log n) per squeeze) which is
+// still fast since OpenSSL is C-level. The pure JS path streams properly (O(n)).
+class ShakeXofNative {
+  constructor(nativeFn) {
+    this._fn = nativeFn;
+    this._parts = [];
+    this._input = null;
+    this._cache = null;
+    this._offset = 0;
+  }
+
+  absorb(data) {
+    if (this._cache !== null) throw new Error("Already finalized");
+    this._parts.push(toBytes(data));
+    return this;
+  }
+
+  squeeze(n) {
+    const end = this._offset + n;
+    if (this._cache === null || this._cache.length < end) {
+      // Combine input parts on first squeeze
+      if (this._input === null) {
+        let total = 0;
+        for (let i = 0; i < this._parts.length; i++) total += this._parts[i].length;
+        this._input = new Uint8Array(total);
+        let off = 0;
+        for (let i = 0; i < this._parts.length; i++) {
+          this._input.set(this._parts[i], off);
+          off += this._parts[i].length;
+        }
+        this._parts = null;
+      }
+      // Re-hash with doubled output to amortize (O(n log n) total)
+      const newLen = Math.max(end, this._cache ? this._cache.length * 2 : 1024);
+      this._cache = this._fn(this._input, newLen);
+    }
+    const result = new Uint8Array(n);
+    for (let i = 0; i < n; i++) result[i] = this._cache[this._offset + i];
+    this._offset = end;
+    return result;
+  }
+}
+
 function shake128Xof() {
+  if (_nativeShake128) return new ShakeXofNative(_nativeShake128);
   return new ShakeXof(1344, 0x1f);
 }
 
 function shake256Xof() {
+  if (_nativeShake256) return new ShakeXofNative(_nativeShake256);
   return new ShakeXof(1088, 0x1f);
 }
 

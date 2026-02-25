@@ -24,6 +24,7 @@
 
 const { ed25519Keygen, ed25519Sign, ed25519Verify } = require("./ed25519");
 const { mlKeygen, mlSign, mlVerify } = require("./ml_dsa");
+const { toBytes } = require("./utils");
 
 // Component sizes
 const _ED25519_SK = 64;
@@ -87,7 +88,9 @@ function hybridDsaKeygen(seed) {
  * @returns {Uint8Array} 3,373-byte hybrid signature
  */
 function hybridDsaSign(message, sk, ctx) {
+  message = toBytes(message);
   if (ctx === undefined || ctx === null) ctx = new Uint8Array(0);
+  else ctx = toBytes(ctx);
   if (sk.length !== HYBRID_DSA_SK_SIZE) {
     throw new Error(`Hybrid DSA sk must be ${HYBRID_DSA_SK_SIZE} bytes, got ${sk.length}`);
   }
@@ -118,7 +121,9 @@ function hybridDsaSign(message, sk, ctx) {
  * @returns {boolean}
  */
 function hybridDsaVerify(message, sig, pk, ctx) {
+  message = toBytes(message);
   if (ctx === undefined || ctx === null) ctx = new Uint8Array(0);
+  else ctx = toBytes(ctx);
   if (sig.length !== HYBRID_DSA_SIG_SIZE) return false;
   if (pk.length !== HYBRID_DSA_PK_SIZE) return false;
 

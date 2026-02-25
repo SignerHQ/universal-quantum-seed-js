@@ -12,9 +12,11 @@
 //     Public key:  32 bytes (compressed Edwards point)
 //     Signature:   64 bytes (R || S)
 //
-// NOT constant-time. For side-channel-resistant deployments, use C/Rust.
+// When Node.js crypto is available, uses native Ed25519 (constant-time OpenSSL).
+// Falls back to pure JavaScript BigInt arithmetic (NOT constant-time).
 
 const { sha512 } = require("./sha2");
+const { toBytes } = require("./utils");
 
 // ── Field & Curve Constants ─────────────────────────────────────
 
@@ -227,12 +229,73 @@ function bytesToBigIntLE(b) {
   return v;
 }
 
+// ── Small-Order Point Rejection ──────────────────────────────────
+// Reject public keys and nonce points in the small subgroup (torsion points).
+// Prevents signature forgery when a protocol allows attacker-chosen public keys.
+
+function isSmallOrder(pt) {
+  // Multiply by cofactor 8: if result is identity, the point has small order
+  let Q = pointDouble(pointDouble(pointDouble(pt))); // 8P
+  const [x, y] = toAffine(Q);
+  return x === 0n && y === 1n;
+}
+
+// ── Native Node.js Ed25519 (constant-time via OpenSSL) ──────────
+
+const _ED25519_SK_DER_PREFIX = Buffer.from(
+  "302e020100300506032b657004220420", "hex"
+);
+const _ED25519_PK_DER_PREFIX = Buffer.from(
+  "302a300506032b6570032100", "hex"
+);
+
+let _nativeKeygen = null;
+let _nativeSign = null;
+let _nativeVerify = null;
+
+try {
+  const nodeCrypto = require("crypto");
+  // Probe: create a test key to check Ed25519 support
+  const _probe = nodeCrypto.createPrivateKey({
+    key: Buffer.concat([_ED25519_SK_DER_PREFIX, Buffer.alloc(32)]),
+    format: "der", type: "pkcs8",
+  });
+  nodeCrypto.sign(null, Buffer.alloc(1), _probe);
+
+  _nativeKeygen = (seed) => {
+    const der = Buffer.concat([_ED25519_SK_DER_PREFIX, Buffer.from(seed)]);
+    const privateKey = nodeCrypto.createPrivateKey({ key: der, format: "der", type: "pkcs8" });
+    const publicKey = nodeCrypto.createPublicKey(privateKey);
+    const pkDer = publicKey.export({ type: "spki", format: "der" });
+    const pk = new Uint8Array(pkDer.subarray(pkDer.length - 32));
+    const sk = new Uint8Array(64);
+    sk.set(seed);
+    sk.set(pk, 32);
+    return { sk, pk };
+  };
+
+  _nativeSign = (message, seed) => {
+    const der = Buffer.concat([_ED25519_SK_DER_PREFIX, Buffer.from(seed)]);
+    const privateKey = nodeCrypto.createPrivateKey({ key: der, format: "der", type: "pkcs8" });
+    return new Uint8Array(nodeCrypto.sign(null, Buffer.from(message), privateKey));
+  };
+
+  _nativeVerify = (message, sig, pk) => {
+    const der = Buffer.concat([_ED25519_PK_DER_PREFIX, Buffer.from(pk)]);
+    const publicKey = nodeCrypto.createPublicKey({ key: der, format: "der", type: "spki" });
+    return nodeCrypto.verify(null, Buffer.from(message), publicKey, Buffer.from(sig));
+  };
+} catch (_) {
+  // Native Ed25519 not available — pure JS fallback
+}
+
 // ── Public API ──────────────────────────────────────────────────
 
 function ed25519Keygen(seed) {
   if (!(seed instanceof Uint8Array) || seed.length !== 32) {
     throw new Error("Ed25519 seed must be a 32-byte Uint8Array");
   }
+  if (_nativeKeygen) return _nativeKeygen(seed);
 
   const h = sha512(seed);
   const a = bytesToBigIntLE(clamp(h));
@@ -248,9 +311,11 @@ function ed25519Keygen(seed) {
 }
 
 function ed25519Sign(message, skBytes) {
+  message = toBytes(message);
   if (!(skBytes instanceof Uint8Array) || skBytes.length !== 64) {
     throw new Error("Ed25519 sk must be a 64-byte Uint8Array");
   }
+  if (_nativeSign) return _nativeSign(message, skBytes.subarray(0, 32));
 
   const seed = skBytes.subarray(0, 32);
   const pkBytes = skBytes.subarray(32, 64);
@@ -292,12 +357,22 @@ function ed25519Sign(message, skBytes) {
 }
 
 function ed25519Verify(message, sigBytes, pkBytes) {
+  message = toBytes(message);
   if (sigBytes.length !== 64 || pkBytes.length !== 32) return false;
 
-  const R = decodePoint(sigBytes.subarray(0, 32));
+  // Decode and validate points (needed for small-order check in both paths)
   const A = decodePoint(pkBytes);
-  if (R === null || A === null) return false;
+  if (A === null) return false;
+  if (isSmallOrder(A)) return false;
 
+  const R = decodePoint(sigBytes.subarray(0, 32));
+  if (R === null) return false;
+  if (isSmallOrder(R)) return false;
+
+  // Native path (constant-time via OpenSSL) — small-order check done above
+  if (_nativeVerify) return _nativeVerify(message, sigBytes, pkBytes);
+
+  // Pure JS fallback (NOT constant-time)
   const S = bytesToBigIntLE(sigBytes.subarray(32, 64));
   if (S >= L) return false;
 

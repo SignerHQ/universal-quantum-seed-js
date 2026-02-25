@@ -11,7 +11,7 @@
 //   Ciphertext:             1,088 bytes
 //   Shared secret:             32 bytes
 
-const { sha3_256, sha3_512, shake128, shake256 } = require("./sha3");
+const { sha3_256, sha3_512, shake128, shake256, shake128Xof } = require("./sha3");
 
 // ── ML-KEM-768 Parameters (FIPS 203 Table 2) ────────────────────
 
@@ -160,15 +160,19 @@ function sampleNtt(seed, row, col) {
   xofInput[seed.length] = col;
   xofInput[seed.length + 1] = row;
 
-  let need = 960;
-  let buf = shake128(xofInput, need);
+  const xof = shake128Xof();
+  xof.absorb(xofInput);
+  let buf = xof.squeeze(960);
 
   const coeffs = new Int32Array(256);
   let count = 0, pos = 0;
   while (count < 256) {
     if (pos + 2 >= buf.length) {
-      need += 168;
-      buf = shake128(xofInput, need);
+      const extra = xof.squeeze(168);
+      const newBuf = new Uint8Array(buf.length + extra.length);
+      newBuf.set(buf);
+      newBuf.set(extra, buf.length);
+      buf = newBuf;
     }
     const d1 = buf[pos] | ((buf[pos + 1] & 0x0f) << 8);
     const d2 = (buf[pos + 1] >> 4) | (buf[pos + 2] << 4);
@@ -493,7 +497,14 @@ function mlKemDecaps(dk, ct) {
 
   const ctPrime = kPkeEncrypt(ekPke, mPrime, rPrime);
 
-  return constantTimeEqual(ct, ctPrime) ? new Uint8Array(Kprime) : new Uint8Array(Kbar);
+  // Constant-time selection: avoid branch on secret comparison result.
+  // Derive mask arithmetically: -1 (0xffffffff) if equal, 0 if not.
+  const mask = (-(constantTimeEqual(ct, ctPrime) | 0)) & 0xff;
+  const result = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) {
+    result[i] = (Kprime[i] & mask) | (Kbar[i] & (~mask & 0xff));
+  }
+  return result;
 }
 
 const EK_SIZE = 1184;

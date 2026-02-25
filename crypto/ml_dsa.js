@@ -35,8 +35,8 @@
 //       leak timing information. For deployments where side-channel attacks are
 //       a concern, use a vetted constant-time C/Rust implementation instead.
 
-const { shake128, shake256 } = require("./sha3");
-const { randomBytes, zeroize } = require("./utils");
+const { shake128, shake256, shake128Xof, shake256Xof } = require("./sha3");
+const { randomBytes, zeroize, toBytes } = require("./utils");
 
 function zeroizeVec(v) {
   for (let i = 0; i < v.length; i++) zeroize(v[i]);
@@ -295,14 +295,18 @@ function packU16LE(n) {
  * seed34: 34-byte Uint8Array (rho || byte(s) || byte(r)).
  */
 function rejNttPoly(seed34) {
+  const xof = shake128Xof();
+  xof.absorb(seed34);
+  let buf = xof.squeeze(3 * N); // ~256 candidates; rejection rate is ~0.4%
   const coeffs = [];
-  let need = 3 * N; // ~256 candidates; rejection rate is ~0.4%
-  let buf = shake128(seed34, need);
   let pos = 0;
   while (coeffs.length < N) {
     if (pos + 3 > buf.length) {
-      need += 3 * 64;
-      buf = shake128(seed34, need);
+      const extra = xof.squeeze(3 * 64);
+      const newBuf = new Uint8Array(buf.length + extra.length);
+      newBuf.set(buf);
+      newBuf.set(extra, buf.length);
+      buf = newBuf;
     }
     const b0 = buf[pos];
     const b1 = buf[pos + 1];
@@ -324,12 +328,18 @@ function rejNttPoly(seed34) {
  */
 function sampleRejEta(seed, nonce) {
   const input = concatBytes(seed, packU16LE(nonce));
-  let stream = shake256(input, 512);
+  const xof = shake256Xof();
+  xof.absorb(input);
+  let stream = xof.squeeze(512);
   const coeffs = [];
   let pos = 0;
   while (coeffs.length < N) {
     if (pos >= stream.length) {
-      stream = shake256(input, stream.length + 256);
+      const extra = xof.squeeze(256);
+      const newStream = new Uint8Array(stream.length + extra.length);
+      newStream.set(stream);
+      newStream.set(extra, stream.length);
+      stream = newStream;
     }
     const b = stream[pos];
     pos++;
@@ -419,7 +429,9 @@ function expandMask(rhoPrime, kappa) {
  * Algorithm 35, FIPS 204. c has tau entries of +/-1, rest 0.
  */
 function sampleInBall(cTilde) {
-  let buf = shake256(cTilde, 8 + TAU); // First 8 bytes for sign bits, then rejection samples
+  const xof = shake256Xof();
+  xof.absorb(cTilde);
+  let buf = xof.squeeze(8 + TAU); // First 8 bytes for sign bits, then rejection samples
   // Extract sign bits from first 8 bytes (64 bits, little-endian)
   // We use two 32-bit halves since JS bitwise ops are 32-bit
   const signLo = (buf[0] | (buf[1] << 8) | (buf[2] << 16) | (buf[3] << 24)) >>> 0;
@@ -434,7 +446,11 @@ function sampleInBall(cTilde) {
     let j;
     while (true) {
       if (pos >= buf.length) {
-        buf = shake256(cTilde, buf.length + 256);
+        const extra = xof.squeeze(256);
+        const newBuf = new Uint8Array(buf.length + extra.length);
+        newBuf.set(buf);
+        newBuf.set(extra, buf.length);
+        buf = newBuf;
       }
       j = buf[pos];
       pos++;
@@ -1117,7 +1133,9 @@ function mlVerifyInternal(message, sigBytes, pkBytes) {
  * @returns {Uint8Array} Signature bytes (3,309 bytes for ML-DSA-65).
  */
 function mlSign(message, sk, ctx, opts) {
+  message = toBytes(message);
   if (ctx === undefined || ctx === null) ctx = new Uint8Array(0);
+  else ctx = toBytes(ctx);
   if (opts === undefined) opts = {};
   if (ctx.length > 255) {
     throw new Error("context string must be <= 255 bytes, got " + ctx.length);
@@ -1143,7 +1161,9 @@ function mlSign(message, sk, ctx, opts) {
  * @returns {boolean} True if the signature is valid, false otherwise.
  */
 function mlVerify(message, sig, pk, ctx) {
+  message = toBytes(message);
   if (ctx === undefined || ctx === null) ctx = new Uint8Array(0);
+  else ctx = toBytes(ctx);
   if (ctx.length > 255) return false;
   const mPrime = concatBytes(
     new Uint8Array([0x00, ctx.length]),

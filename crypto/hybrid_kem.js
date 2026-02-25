@@ -150,8 +150,14 @@ function hybridKemDecaps(dk, ct) {
   const ephPk = ct.subarray(0, _X25519_PK);
   const mlCt = ct.subarray(_X25519_PK);
 
-  // X25519 shared secret recovery
-  const xSs = x25519(xSk, ephPk);
+  // X25519 shared secret recovery — don't throw on attacker-controlled ciphertexts.
+  // If ephPk is a low-order point, fold zero into the KDF and let ML-KEM carry security.
+  let xSs;
+  try {
+    xSs = x25519(xSk, ephPk);
+  } catch (_) {
+    xSs = new Uint8Array(32); // all-zero classical contribution
+  }
 
   // ML-KEM decapsulation
   const mlSs = mlKemDecaps(mlDk, mlCt);

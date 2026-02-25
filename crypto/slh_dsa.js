@@ -38,7 +38,7 @@
  */
 
 const { shake256 } = require("./sha3");
-const { randomBytes } = require("./utils");
+const { randomBytes, toBytes } = require("./utils");
 
 // ── SLH-DSA-SHAKE-128s Parameters (FIPS 205 Table 2) ─────────────
 
@@ -1001,7 +1001,9 @@ function _slh_verify_internal(message, sig_bytes, pk_bytes) {
  * @returns {Uint8Array} Signature bytes (7,856 bytes)
  */
 function slhSign(message, sk, ctx, opts) {
+  message = toBytes(message);
   if (ctx === undefined || ctx === null) ctx = new Uint8Array(0);
+  else ctx = toBytes(ctx);
   if (opts === undefined || opts === null) opts = {};
   if (ctx.length > 255) {
     throw new Error(`context string must be <= 255 bytes, got ${ctx.length}`);
@@ -1032,7 +1034,9 @@ function slhSign(message, sk, ctx, opts) {
  * @returns {boolean} True if valid, false otherwise
  */
 function slhVerify(message, sig, pk, ctx) {
+  message = toBytes(message);
   if (ctx === undefined || ctx === null) ctx = new Uint8Array(0);
+  else ctx = toBytes(ctx);
   if (ctx.length > 255) return false;
   const m_prime = concat(
     new Uint8Array([0x00, ctx.length]),
