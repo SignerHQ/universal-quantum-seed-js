@@ -11,6 +11,8 @@
 const { sha256, sha512, hmacSha256, hmacSha512, hkdfExpand, pbkdf2Sha512, pbkdf2Sha512Async } = require("./crypto/sha2");
 const { LOOKUP, LANGUAGES, DARK_VISUALS } = require("./words");
 
+const { argon2id } = require("./crypto/argon2");
+
 const VERSION = "1.0";
 
 // 256 base English words — one per icon position (0-255)
@@ -57,6 +59,12 @@ const DOMAIN = new TextEncoder().encode("universal-seed-v1");
 
 // KDF parameters
 const PBKDF2_ITERATIONS = 600000;
+
+// Argon2id parameters (OWASP recommended for high-value targets)
+const ARGON2_TIME = 3;         // iterations
+const ARGON2_MEMORY = 65536;   // 64 MiB
+const ARGON2_PARALLEL = 4;     // lanes
+const ARGON2_HASHLEN = 64;     // output bytes
 
 // Build sorted keys for binary search
 const SORTED_KEYS = Object.keys(LOOKUP).sort();
@@ -556,10 +564,16 @@ function getSeed(words, passphrase = "") {
   const prk = hmacSha512(DOMAIN, payload);
   zeroize(payload);
 
-  // Step 3: Key stretching — PBKDF2-SHA512 (no Argon2id in pure JS)
-  const salt = concatBytes(DOMAIN, toBytes("-stretch-pbkdf2"));
-  const stretched = pbkdf2Sha512(prk, salt, PBKDF2_ITERATIONS, 64);
+  // Step 3: Chained KDF — PBKDF2-SHA512 → Argon2id (defense in depth)
+  const salt = concatBytes(DOMAIN, toBytes("-stretch"));
+  const stage1 = pbkdf2Sha512(prk, concatBytes(salt, toBytes("-pbkdf2")), PBKDF2_ITERATIONS, 64);
   zeroize(prk);
+  const stretched = argon2id(
+    stage1,
+    concatBytes(salt, toBytes("-argon2id")),
+    ARGON2_TIME, ARGON2_MEMORY, ARGON2_PARALLEL, ARGON2_HASHLEN
+  );
+  zeroize(stage1);
 
   // Step 4: HKDF-Expand
   const master = hkdfExpand(stretched, concatBytes(DOMAIN, toBytes("-master")), 64);
@@ -589,9 +603,20 @@ async function getSeedAsync(words, passphrase = "") {
   const prk = hmacSha512(DOMAIN, payload);
   zeroize(payload);
 
-  const salt = concatBytes(DOMAIN, toBytes("-stretch-pbkdf2"));
-  const stretched = await pbkdf2Sha512Async(prk, salt, PBKDF2_ITERATIONS, 64);
+  // Chained KDF: PBKDF2-SHA512 → Argon2id (defense in depth)
+  const salt = concatBytes(DOMAIN, toBytes("-stretch"));
+
+  // Stage 1: PBKDF2-SHA512
+  const stage1 = await pbkdf2Sha512Async(prk, concatBytes(salt, toBytes("-pbkdf2")), PBKDF2_ITERATIONS, 64);
   zeroize(prk);
+
+  // Stage 2: Argon2id on top of PBKDF2 output
+  const stretched = argon2id(
+    stage1,
+    concatBytes(salt, toBytes("-argon2id")),
+    ARGON2_TIME, ARGON2_MEMORY, ARGON2_PARALLEL, ARGON2_HASHLEN
+  );
+  zeroize(stage1);
 
   const master = hkdfExpand(stretched, concatBytes(DOMAIN, toBytes("-master")), 64);
   zeroize(stretched);
@@ -736,7 +761,7 @@ function getEntropyBits(wordCount, passphrase = "") {
 // ── KDF Info ────────────────────────────────────────────────────
 
 function kdfInfo() {
-  return `PBKDF2-SHA512 (${PBKDF2_ITERATIONS.toLocaleString()} rounds)`;
+  return `PBKDF2-SHA512 (${PBKDF2_ITERATIONS.toLocaleString()} rounds) + Argon2id (mem=${ARGON2_MEMORY}KB, t=${ARGON2_TIME}, p=${ARGON2_PARALLEL})`;
 }
 
 // ── Entropy Testing ─────────────────────────────────────────────
