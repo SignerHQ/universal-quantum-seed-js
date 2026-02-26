@@ -51,7 +51,7 @@ function build() {
 
   // IIFE header
   parts.push(`// Universal Quantum Seed v${version} — Browser Bundle
-// https://github.com/nicholasgasior/universal-quantum-seed-js
+// https://github.com/SignerHQ/universal-quantum-seed-js
 // MIT License — (c) 2026 Signer.io
 //
 // Usage:

@@ -1,5 +1,5 @@
 // Universal Quantum Seed v1.0 — Browser Bundle
-// https://github.com/nicholasgasior/universal-quantum-seed-js
+// https://github.com/SignerHQ/universal-quantum-seed-js
 // MIT License — (c) 2026 Signer.io
 //
 // Usage:
