@@ -6,7 +6,7 @@
 // Pure JavaScript fallback. SHA-512 uses BigInt for 64-bit words.
 // When Node.js crypto is available, uses native OpenSSL (constant-time, much faster).
 
-const { toBytes } = require("./utils");
+const { toBytes, zeroize } = require("./utils");
 
 // --- Native Node.js crypto fast paths (SHA-256, SHA-512, HMAC, PBKDF2 via OpenSSL) ---
 
@@ -246,7 +246,10 @@ function hmacSha256(key, data) {
   const outer = new Uint8Array(blockSize + 32);
   outer.set(opad);
   outer.set(innerHash, blockSize);
-  return sha256(outer);
+  const result = sha256(outer);
+  zeroize(paddedKey); zeroize(ipad); zeroize(opad);
+  zeroize(inner); zeroize(innerHash); zeroize(outer);
+  return result;
 }
 
 function hmacSha512(key, data) {
@@ -274,7 +277,10 @@ function hmacSha512(key, data) {
   const outer = new Uint8Array(blockSize + 64);
   outer.set(opad);
   outer.set(innerHash, blockSize);
-  return sha512(outer);
+  const result = sha512(outer);
+  zeroize(paddedKey); zeroize(ipad); zeroize(opad);
+  zeroize(inner); zeroize(innerHash); zeroize(outer);
+  return result;
 }
 
 // --- HKDF-Expand (RFC 5869, SHA-512) ---

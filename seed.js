@@ -9,11 +9,12 @@
 // - 36 words = 34 random + 2 checksum = 272 bits entropy
 
 const { sha256, sha512, hmacSha256, hmacSha512, hkdfExpand, pbkdf2Sha512, pbkdf2Sha512Async } = require("./crypto/sha2");
+const { constantTimeEqual } = require("./crypto/utils");
 const { LOOKUP, LANGUAGES, DARK_VISUALS } = require("./words");
 
 const { argon2id } = require("./crypto/argon2");
 
-const VERSION = "1.0";
+const VERSION = "1.1";
 
 // 256 base English words — one per icon position (0-255)
 const BASE_WORDS = [
@@ -501,7 +502,10 @@ function verifyChecksum(seed) {
   if (indexes.length !== 24 && indexes.length !== 36) return false;
   const data = indexes.slice(0, -2);
   const expected = computeChecksum(data);
-  return indexes[indexes.length - 2] === expected[0] && indexes[indexes.length - 1] === expected[1];
+  return constantTimeEqual(
+    new Uint8Array([indexes[indexes.length - 2], indexes[indexes.length - 1]]),
+    new Uint8Array(expected)
+  );
 }
 
 // ── Index Conversion ────────────────────────────────────────────
@@ -552,7 +556,10 @@ function getSeed(words, passphrase = "") {
 
   const data = indexes.slice(0, -2);
   const expected = computeChecksum(data);
-  if (indexes[indexes.length - 2] !== expected[0] || indexes[indexes.length - 1] !== expected[1]) {
+  if (!constantTimeEqual(
+    new Uint8Array([indexes[indexes.length - 2], indexes[indexes.length - 1]]),
+    new Uint8Array(expected)
+  )) {
     throw new Error("invalid seed checksum");
   }
 
@@ -561,7 +568,7 @@ function getSeed(words, passphrase = "") {
   for (let pos = 0; pos < data.length; pos++) {
     payloadParts.push(packLE_BB(pos, data[pos]));
   }
-  if (passphrase) payloadParts.push(toBytes(passphrase));
+  if (passphrase) payloadParts.push(toBytes(passphrase.normalize("NFKC")));
   const payload = concatBytes(...payloadParts);
 
   // Step 2: HKDF-Extract
@@ -593,7 +600,10 @@ async function getSeedAsync(words, passphrase = "") {
 
   const data = indexes.slice(0, -2);
   const expected = computeChecksum(data);
-  if (indexes[indexes.length - 2] !== expected[0] || indexes[indexes.length - 1] !== expected[1]) {
+  if (!constantTimeEqual(
+    new Uint8Array([indexes[indexes.length - 2], indexes[indexes.length - 1]]),
+    new Uint8Array(expected)
+  )) {
     throw new Error("invalid seed checksum");
   }
 
@@ -601,7 +611,7 @@ async function getSeedAsync(words, passphrase = "") {
   for (let pos = 0; pos < data.length; pos++) {
     payloadParts.push(packLE_BB(pos, data[pos]));
   }
-  if (passphrase) payloadParts.push(toBytes(passphrase));
+  if (passphrase) payloadParts.push(toBytes(passphrase.normalize("NFKC")));
   const payload = concatBytes(...payloadParts);
 
   const prk = hmacSha512(DOMAIN, payload);

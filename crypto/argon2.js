@@ -371,13 +371,16 @@ function argon2id(password, salt, timeCost, memoryCost, parallelism, hashLen) {
     for (let i = 0; i < BLOCK_U32; i++) finalBlock[i] ^= memory[off + i];
   }
 
-  const result = argon2Hash(storeBlock(finalBlock, 0), T);
-
-  // Best-effort cleanup of sensitive memory
-  memory.fill(0);
-  finalBlock.fill(0);
-  _R.fill(0);
-  _tmp.fill(0);
+  let result;
+  try {
+    result = argon2Hash(storeBlock(finalBlock, 0), T);
+  } finally {
+    // Best-effort cleanup of sensitive memory
+    memory.fill(0);
+    finalBlock.fill(0);
+    _R.fill(0);
+    _tmp.fill(0);
+  }
 
   return result;
 }
