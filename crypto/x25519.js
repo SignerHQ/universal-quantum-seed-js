@@ -13,23 +13,23 @@
 //     Shared secret:  32 bytes
 //
 // When Node.js crypto is available, uses native X25519 (constant-time OpenSSL).
-// Falls back to pure JavaScript BigInt arithmetic (NOT constant-time).
+// Falls back to pure JavaScript using fixed-width 16-limb field arithmetic
+// (no BigInt). All control flow and arithmetic is truly constant-time.
 
-const P = 2n ** 255n - 19n;
-const A24 = 121665n; // (A - 2) / 4 where A = 486662
+const {
+  feZero, feOne, feFromBytes, feToBytes,
+  feAdd, feSub, feMul, feSqr, feInv, feCswap,
+} = require("./field25519");
+
+// (A - 2) / 4 where A = 486662
+const _A24 = feFromBytes(new Uint8Array([
+  0x39, 0xdb, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+])); // 121665
 
 // ── Helpers ─────────────────────────────────────────────────────
-
-function modPow(base, exp, mod) {
-  base = ((base % mod) + mod) % mod;
-  let result = 1n;
-  while (exp > 0n) {
-    if (exp & 1n) result = result * base % mod;
-    exp >>= 1n;
-    base = base * base % mod;
-  }
-  return result;
-}
 
 function clamp(kBytes) {
   const k = new Uint8Array(kBytes);
@@ -39,69 +39,55 @@ function clamp(kBytes) {
   return k;
 }
 
-function decodeU(uBytes) {
-  const u = new Uint8Array(uBytes);
-  u[31] &= 127; // Mask bit 255 per RFC 7748
-  let val = 0n;
-  for (let i = 31; i >= 0; i--) val = (val << 8n) | BigInt(u[i]);
-  return val;
-}
-
-function encodeU(u) {
-  u = ((u % P) + P) % P;
-  const out = new Uint8Array(32);
-  for (let i = 0; i < 32; i++) {
-    out[i] = Number(u & 0xffn);
-    u >>= 8n;
-  }
-  return out;
-}
-
 // ── Core Scalar Multiplication (RFC 7748 Section 5) ─────────────
+// Uses fixed-width field arithmetic — fully constant-time.
 
 function x25519Raw(kBytes, uBytes) {
   const kClamped = clamp(kBytes);
-  let k = 0n;
-  for (let i = 31; i >= 0; i--) k = (k << 8n) | BigInt(kClamped[i]);
-  const u = decodeU(uBytes);
 
-  let x2 = 1n, z2 = 0n;
-  let x3 = u, z3 = 1n;
-  let swap = 0n;
+  // Decode u-coordinate, masking bit 255 per RFC 7748
+  const uMasked = new Uint8Array(uBytes);
+  uMasked[31] &= 127;
+  const u = feFromBytes(uMasked);
 
-  for (let t = 254n; t >= 0n; t--) {
-    const kt = (k >> t) & 1n;
+  let x2 = feOne();
+  let z2 = feZero();
+  let x3 = feFromBytes(uMasked);
+  let z3 = feOne();
+  let swap = 0;
+
+  for (let t = 254; t >= 0; t--) {
+    const kt = (kClamped[t >>> 3] >>> (t & 7)) & 1;
     swap ^= kt;
-    if (swap) {
-      [x2, x3] = [x3, x2];
-      [z2, z3] = [z3, z2];
-    }
+    // Constant-time conditional swap
+    feCswap(x2, x3, swap);
+    feCswap(z2, z3, swap);
     swap = kt;
 
-    const A = (x2 + z2) % P;
-    const AA = A * A % P;
-    const B = (x2 - z2 + P) % P;
-    const BB = B * B % P;
-    const E = (AA - BB + P) % P;
-    const C = (x3 + z3) % P;
-    const DD = (x3 - z3 + P) % P;
-    const DA = DD * A % P;
-    const CB = C * B % P;
+    const A = feAdd(x2, z2);
+    const AA = feSqr(A);
+    const B = feSub(x2, z2);
+    const BB = feSqr(B);
+    const E = feSub(AA, BB);
+    const C = feAdd(x3, z3);
+    const DD = feSub(x3, z3);
+    const DA = feMul(DD, A);
+    const CB = feMul(C, B);
 
-    x3 = (DA + CB) % P;
-    x3 = x3 * x3 % P;
-    z3 = (DA - CB + P) % P;
-    z3 = u * (z3 * z3 % P) % P;
-    x2 = AA * BB % P;
-    z2 = E * ((AA + A24 * E) % P) % P;
+    const sum = feAdd(DA, CB);
+    x3 = feSqr(sum);
+    const diff = feSub(DA, CB);
+    z3 = feMul(u, feSqr(diff));
+    x2 = feMul(AA, BB);
+    z2 = feMul(E, feAdd(AA, feMul(_A24, E)));
   }
 
-  if (swap) {
-    [x2, x3] = [x3, x2];
-    [z2, z3] = [z3, z2];
-  }
+  // Final swap (branchless)
+  feCswap(x2, x3, swap);
+  feCswap(z2, z3, swap);
 
-  return (x2 * modPow(z2, P - 2n, P)) % P;
+  // x2 * z2^(p-2)
+  return feToBytes(feMul(x2, feInv(z2)));
 }
 
 // ── Native Node.js X25519 (constant-time via OpenSSL) ───────────
@@ -156,8 +142,7 @@ function x25519Keygen(seed) {
   // Pure JS fallback
   const basepoint = new Uint8Array(32);
   basepoint[0] = 9;
-  const u = x25519Raw(sk, basepoint);
-  const pk = encodeU(u);
+  const pk = x25519Raw(sk, basepoint);
   return { sk, pk };
 }
 
@@ -173,20 +158,35 @@ function x25519(sk, pk) {
   if (_nativeX25519DH) {
     result = _nativeX25519DH(sk, pk);
   } else {
-    const u = x25519Raw(sk, pk);
-    result = encodeU(u);
+    result = x25519Raw(sk, pk);
   }
 
   // Reject low-order points (all-zero output) per RFC 7748 Section 6.1
-  let allZero = true;
-  for (let i = 0; i < 32; i++) {
-    if (result[i] !== 0) { allZero = false; break; }
-  }
-  if (allZero) {
+  // Constant-time: accumulate OR of all bytes (no early break)
+  let acc = 0;
+  for (let i = 0; i < 32; i++) acc |= result[i];
+  if (acc === 0) {
     throw new Error("X25519: low-order input point (all-zero shared secret)");
   }
 
   return result;
 }
 
-module.exports = { x25519Keygen, x25519, X25519_SK_SIZE: 32, X25519_PK_SIZE: 32 };
+/**
+ * X25519 shared secret without low-order point rejection.
+ * For use in hybrid KEM where ML-KEM carries security if classical fails.
+ * Avoids try/catch timing leak on attacker-controlled ciphertexts.
+ */
+function x25519NoCheck(sk, pk) {
+  if (_nativeX25519DH) {
+    // Native path may throw on low-order points — catch without timing leak
+    // (Node.js native crypto is already constant-time; the exception is rare
+    // and only occurs on malicious input, not during normal operation)
+    try { return _nativeX25519DH(sk, pk); }
+    catch (_) { return new Uint8Array(32); }
+  }
+  // Pure JS: compute raw, return result (may be all-zero for low-order points)
+  return x25519Raw(sk, pk);
+}
+
+module.exports = { x25519Keygen, x25519, x25519NoCheck, X25519_SK_SIZE: 32, X25519_PK_SIZE: 32 };

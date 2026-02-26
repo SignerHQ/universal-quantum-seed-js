@@ -407,15 +407,14 @@ const { randomBytes, constantTimeEqual } = require("./utils");
 
 function ekModulusCheck(ek) {
   if (ek.length !== 1184) return false;
-  const tPart = ek.subarray(0, 384 * K);
+  // Constant-time: check all chunks without early return
+  let valid = 1;
   for (let i = 0; i < K; i++) {
-    const chunk = tPart.subarray(384 * i, 384 * (i + 1));
+    const chunk = ek.subarray(384 * i, 384 * (i + 1));
     const reencoded = byteEncode(byteDecode(chunk, 12), 12);
-    for (let j = 0; j < 384; j++) {
-      if (chunk[j] !== reencoded[j]) return false;
-    }
+    valid &= constantTimeEqual(chunk, reencoded) ? 1 : 0;
   }
-  return true;
+  return valid === 1;
 }
 
 function dkHashCheck(dk) {

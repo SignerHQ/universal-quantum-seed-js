@@ -20,9 +20,9 @@
 //     Ciphertext:                 1,120 bytes  (X25519 eph_pk 32B + ML-KEM ct 1,088B)
 //     Shared secret:                 32 bytes
 //
-// NOT constant-time. For side-channel-resistant deployments, use C/Rust.
+// Best-effort constant-time. For hardware side-channel resistance, use C/Rust.
 
-const { x25519Keygen, x25519 } = require("./x25519");
+const { x25519Keygen, x25519, x25519NoCheck } = require("./x25519");
 const { mlKemKeygen, mlKemEncaps, mlKemDecaps } = require("./ml_kem");
 const { sha256, hmacSha256 } = require("./sha2");
 const { randomBytes, zeroize } = require("./utils");
@@ -161,14 +161,9 @@ function hybridKemDecaps(dk, ct) {
   const ephPk = ct.subarray(0, _X25519_PK);
   const mlCt = ct.subarray(_X25519_PK);
 
-  // X25519 shared secret recovery — don't throw on attacker-controlled ciphertexts.
-  // If ephPk is a low-order point, fold zero into the KDF and let ML-KEM carry security.
-  let xSs;
-  try {
-    xSs = x25519(xSk, ephPk);
-  } catch (_) {
-    xSs = new Uint8Array(32); // all-zero classical contribution
-  }
+  // X25519 shared secret recovery — constant-time, no throw on low-order points.
+  // If ephPk is a low-order point, result may be all-zero; ML-KEM carries security.
+  const xSs = x25519NoCheck(xSk, ephPk);
 
   // ML-KEM decapsulation
   const mlSs = mlKemDecaps(mlDk, mlCt);

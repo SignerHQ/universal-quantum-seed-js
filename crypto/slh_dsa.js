@@ -32,13 +32,14 @@
  *     - Signing defaults to hedged mode (addrnd generated via CSPRNG)
  *       as recommended by FIPS 205. Pass deterministic=true for the deterministic
  *       variant (uses PK.seed as opt_rand).
- *     - NOT constant-time: JavaScript branching and hash-call patterns may leak
- *       timing information. For deployments where side-channel attacks are a
- *       concern, use a vetted constant-time C/Rust implementation instead.
+ *     - Best-effort constant-time: all control flow is branchless.
+ *       Hash computations (SHAKE-256) are fixed-time for same-length inputs.
+ *       For deployments where hardware side-channel attacks are a concern,
+ *       use a vetted constant-time C/Rust implementation instead.
  */
 
 const { shake256 } = require("./sha3");
-const { randomBytes, toBytes } = require("./utils");
+const { randomBytes, toBytes, constantTimeEqual } = require("./utils");
 
 // ── SLH-DSA-SHAKE-128s Parameters (FIPS 205 Table 2) ─────────────
 
@@ -218,18 +219,41 @@ function concat(...arrays) {
 }
 
 /**
- * Compare two Uint8Arrays for equality.
+ * Constant-time comparison of two Uint8Arrays.
+ * Delegates to the shared tiered implementation in utils.js:
+ *   Tier 1: Node.js crypto.timingSafeEqual (C-backed)
+ *   Tier 2: Inline WASM ct_equal (browser, no JIT variation)
+ *   Tier 3: Pure JS XOR-accumulate fallback
  * @param {Uint8Array} a
  * @param {Uint8Array} b
  * @returns {boolean}
  */
 function bytesEqual(a, b) {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) {
-    diff |= a[i] ^ b[i];
+  return constantTimeEqual(a, b);
+}
+
+/**
+ * Constant-time conditional swap for Merkle tree traversals.
+ * When bit=0: returns [a, b] (no swap).
+ * When bit=1: returns [b, a] (swap).
+ * bit MUST be 0 or 1.
+ * @param {number} bit
+ * @param {Uint8Array} a
+ * @param {Uint8Array} b
+ * @returns {Uint8Array} concatenation left||right
+ */
+function ctSwapConcat(bit, a, b) {
+  const n = a.length;
+  const out = new Uint8Array(n * 2);
+  // mask is 0x00 when bit=0, 0xFF when bit=1
+  const mask = (-bit) & 0xFF;
+  for (let i = 0; i < n; i++) {
+    const diff = a[i] ^ b[i];
+    const sel = diff & mask;
+    out[i] = a[i] ^ sel;         // left: a when bit=0, b when bit=1
+    out[n + i] = b[i] ^ sel;     // right: b when bit=0, a when bit=1
   }
-  return diff === 0;
+  return out;
 }
 
 /**
@@ -656,19 +680,16 @@ function _xmss_root_from_sig(idx, sig, auth, msg, pk_seed, adrs) {
   _adrs_set_keypair(wots_adrs, idx);
   let node = _wots_pk_from_sig(sig, msg, pk_seed, wots_adrs);
 
-  // Walk up the tree using auth path
+  // Walk up the tree using auth path (branchless byte-order swap)
   const tree_adrs = _adrs_copy(adrs);
   _adrs_set_type(tree_adrs, _ADRS_TYPE_TREE);
   for (let j = 0; j < _HP; j++) {
     _adrs_set_tree_height(tree_adrs, j + 1);
+    _adrs_set_tree_index(tree_adrs, idx >> (j + 1));
     const auth_j = auth.subarray(j * _N, (j + 1) * _N);
-    if (((idx >> j) & 1) === 0) {
-      _adrs_set_tree_index(tree_adrs, idx >> (j + 1));
-      node = _H(pk_seed, tree_adrs, concat(node, auth_j));
-    } else {
-      _adrs_set_tree_index(tree_adrs, idx >> (j + 1));
-      node = _H(pk_seed, tree_adrs, concat(auth_j, node));
-    }
+    // Branchless: bit==0 -> H(node||auth), bit==1 -> H(auth||node)
+    const bit = (idx >> j) & 1;
+    node = _H(pk_seed, tree_adrs, ctSwapConcat(bit, node, auth_j));
   }
   return node;
 }
@@ -776,23 +797,20 @@ function _fors_pk_from_sig(sig_fors, md, pk_seed, adrs) {
     _adrs_set_tree_index(node_adrs, tree_index);
     let node = _F(pk_seed, node_adrs, sk);
 
-    // Walk up the tree (Algorithm 17 step-by-step parent indexing)
+    // Walk up the tree (branchless byte-order swap + parent index)
     for (let j = 0; j < _A; j++) {
       const auth_j = sig_fors.subarray(off, off + _N);
       off += _N;
 
       const parent_adrs = _adrs_copy(adrs);
       _adrs_set_tree_height(parent_adrs, j + 1);
-
-      if (((idx >> j) & 1) === 0) {
-        tree_index >>= 1;
-        _adrs_set_tree_index(parent_adrs, tree_index);
-        node = _H(pk_seed, parent_adrs, concat(node, auth_j));
-      } else {
-        tree_index = (tree_index - 1) >> 1;
-        _adrs_set_tree_index(parent_adrs, tree_index);
-        node = _H(pk_seed, parent_adrs, concat(auth_j, node));
-      }
+      const bit = (idx >> j) & 1;
+      // Branchless parent index: bit==0 -> tree_index>>1,
+      // bit==1 -> (tree_index-1)>>1
+      tree_index = (tree_index - bit) >> 1;
+      _adrs_set_tree_index(parent_adrs, tree_index);
+      // Branchless byte-order swap
+      node = _H(pk_seed, parent_adrs, ctSwapConcat(bit, node, auth_j));
     }
 
     roots_parts.push(node);

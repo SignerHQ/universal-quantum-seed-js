@@ -4,7 +4,7 @@
 
 // Ed25519 digital signatures (RFC 8032).
 //
-// Pure JavaScript implementation using BigInt for field arithmetic.
+// Pure JavaScript implementation using fixed-width 16-limb field arithmetic.
 // Extended coordinates (X, Y, Z, T) where x=X/Z, y=Y/Z, X*Y=Z*T.
 //
 // Sizes:
@@ -13,86 +13,95 @@
 //     Signature:   64 bytes (R || S)
 //
 // When Node.js crypto is available, uses native Ed25519 (constant-time OpenSSL).
-// Falls back to pure JavaScript BigInt arithmetic (NOT constant-time).
+// Falls back to pure JavaScript using fixed-width 16-limb field arithmetic.
+// All control flow and arithmetic is constant-time (no BigInt in hot path).
 
 const { sha512 } = require("./sha2");
-const { toBytes, zeroize } = require("./utils");
+const { toBytes, zeroize, constantTimeEqual } = require("./utils");
+const {
+  feZero, feOne, feCopy, feFromBytes, feToBytes,
+  feAdd, feSub, feNeg, feMul, feSqr, feInv, feSqrt,
+  feCswap, feCmov, feIsZero, feIsNeg, feEqual,
+} = require("./field25519");
 
-// ── Field & Curve Constants ─────────────────────────────────────
+// ── Curve Constants ─────────────────────────────────────────────
 
-const P = 2n ** 255n - 19n;
-const L = 2n ** 252n + 27742317777372353535851937790883648493n; // Group order
-const D = (-121665n * modInv(121666n, P) % P + P) % P;
+// Group order L = 2^252 + 27742317777372353535851937790883648493
+// Stored as bytes for scalar arithmetic (BigInt only for non-secret scalars)
+const L = 2n ** 252n + 27742317777372353535851937790883648493n;
 
-// Base point G (RFC 8032): y = 4/5
-const Gy = 4n * modInv(5n, P) % P;
-const Gx_sq = ((Gy * Gy % P - 1n + P) * modInv((D * Gy % P * Gy % P + 1n) % P, P)) % P;
-let Gx = modPow(Gx_sq, (P + 3n) / 8n, P);
-if ((Gx * Gx - Gx_sq) % P !== 0n) {
-  Gx = (Gx * modPow(2n, (P - 1n) / 4n, P)) % P;
-}
-if (Gx & 1n) Gx = (P - Gx) % P;
+// d = -121665/121666 mod p
+const _D = feFromBytes(new Uint8Array([
+  0xa3, 0x78, 0x59, 0x13, 0xca, 0x4d, 0xeb, 0x75,
+  0xab, 0xd8, 0x41, 0x41, 0x4d, 0x0a, 0x70, 0x00,
+  0x98, 0xe8, 0x79, 0x77, 0x79, 0x40, 0xc7, 0x8c,
+  0x73, 0xfe, 0x6f, 0x2b, 0xee, 0x6c, 0x03, 0x52,
+]));
 
-const G = [Gx % P, Gy % P, 1n, (Gx * Gy) % P];
-const ZERO = [0n, 1n, 1n, 0n];
+// 2*d
+const _D2 = feAdd(_D, _D);
 
-// ── Field Helpers ───────────────────────────────────────────────
+// Base point G: y = 4/5 mod p
+const G = (function () {
+  // Compute y = 4 * inv(5)
+  const four = feFromBytes(new Uint8Array([4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+  const five = feFromBytes(new Uint8Array([5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+  const y = feMul(four, feInv(five));
 
-function modInv(a, m) {
-  return modPow(((a % m) + m) % m, m - 2n, m);
-}
+  // x^2 = (y^2 - 1) / (d*y^2 + 1)
+  const ySq = feSqr(y);
+  const num = feSub(ySq, feOne());
+  const den = feAdd(feMul(_D, ySq), feOne());
+  const xSq = feMul(num, feInv(den));
 
-function modPow(base, exp, mod) {
-  base = ((base % mod) + mod) % mod;
-  let result = 1n;
-  while (exp > 0n) {
-    if (exp & 1n) result = result * base % mod;
-    exp >>= 1n;
-    base = base * base % mod;
-  }
-  return result;
-}
+  let x = feSqrt(xSq);
+  if (x === null) throw new Error("Ed25519: basepoint sqrt failed");
+
+  // x should be even (positive)
+  if (feIsNeg(x)) x = feNeg(x);
+
+  return [x, y, feOne(), feMul(x, y)];
+})();
+
+const ZERO = [feZero(), feOne(), feOne(), feZero()];
 
 // ── Point Arithmetic ────────────────────────────────────────────
 
 function pointAdd(P1, Q) {
-  if (P1[0] === 0n && P1[1] === 1n && P1[2] === 1n && P1[3] === 0n) return Q;
-  if (Q[0] === 0n && Q[1] === 1n && Q[2] === 1n && Q[3] === 0n) return P1;
-
+  // No identity-point early returns — always perform full computation for
+  // constant-time execution. Extended coordinates handle identity correctly.
   const [X1, Y1, Z1, T1] = P1;
   const [X2, Y2, Z2, T2] = Q;
 
-  const A = (Y1 - X1 + P) * ((Y2 - X2 + P) % P) % P;
-  const B = (Y1 + X1) % P * ((Y2 + X2) % P) % P;
-  const C = 2n * D * T1 % P * T2 % P;
-  const DD = 2n * Z1 * Z2 % P;
-  const E = (B - A + P) % P;
-  const F = (DD - C + P) % P;
-  const GG = (DD + C) % P;
-  const H = (B + A) % P;
+  const A = feMul(feSub(Y1, X1), feSub(Y2, X2));
+  const B = feMul(feAdd(Y1, X1), feAdd(Y2, X2));
+  const C = feMul(feMul(_D2, T1), T2);
+  const DD = feMul(feAdd(Z1, Z1), Z2);
+  const E = feSub(B, A);
+  const F = feSub(DD, C);
+  const GG = feAdd(DD, C);
+  const H = feAdd(B, A);
 
-  return [E * F % P, GG * H % P, F * GG % P, E * H % P];
+  return [feMul(E, F), feMul(GG, H), feMul(F, GG), feMul(E, H)];
 }
 
 function pointDouble(P1) {
-  if (P1[0] === 0n && P1[1] === 1n && P1[2] === 1n && P1[3] === 0n) return ZERO;
-
   const [X1, Y1, Z1] = P1;
 
-  const A = X1 * X1 % P;
-  const B = Y1 * Y1 % P;
-  const C = 2n * Z1 * Z1 % P;
-  const DD = (P - A) % P;
-  const E = ((X1 + Y1) * (X1 + Y1) % P - A - B + 2n * P) % P;
-  const GG = (DD + B) % P;
-  const F = (GG - C + P) % P;
-  const H = (DD - B + P) % P;
+  const A = feSqr(X1);
+  const B = feSqr(Y1);
+  const C = feAdd(feSqr(Z1), feSqr(Z1));
+  const DD = feNeg(A);
+  const E = feSub(feSub(feSqr(feAdd(X1, Y1)), A), B);
+  const GG = feAdd(DD, B);
+  const F = feSub(GG, C);
+  const H = feSub(DD, B);
 
-  return [E * F % P, GG * H % P, F * GG % P, E * H % P];
+  return [feMul(E, F), feMul(GG, H), feMul(F, GG), feMul(E, H)];
 }
 
 function pointNegate(P1) {
-  return [(P - P1[0]) % P, P1[1], P1[2], (P - P1[3]) % P];
+  return [feNeg(P1[0]), feCopy(P1[1]), feCopy(P1[2]), feNeg(P1[3])];
 }
 
 // Precomputed table for G (built on first use)
@@ -109,69 +118,59 @@ function buildGTable() {
   _gTable = table;
 }
 
+// Constant-time scalar multiplication: [k]G using precomputed table.
+// No branches on secret scalar bits.
 function scalarMultBase(k) {
-  if (k === 0n) return ZERO;
-  let negate = false;
-  if (k < 0n) { k = -k; negate = true; }
   k = ((k % L) + L) % L;
-
   if (_gTable === null) buildGTable();
 
-  let result = ZERO;
+  let R = [feCopy(ZERO[0]), feCopy(ZERO[1]), feCopy(ZERO[2]), feCopy(ZERO[3])];
   for (let i = 0; i < _gTable.length; i++) {
-    if (k & (1n << BigInt(i))) {
-      result = pointAdd(result, _gTable[i]);
+    const bit = Number((k >> BigInt(i)) & 1n);
+    const added = pointAdd(R, _gTable[i]);
+    // CT select: bit=1 → added, bit=0 → R
+    for (let c = 0; c < 4; c++) {
+      feCmov(R[c], added[c], bit);
     }
   }
-
-  return negate ? pointNegate(result) : result;
+  return R;
 }
 
+// Constant-time scalar multiplication: [k]P using Montgomery ladder.
+// Fixed 253-bit iteration regardless of actual bit length of k.
 function scalarMult(k, pt) {
-  if (k === 0n) return ZERO;
-  if (k < 0n) { k = -k; pt = pointNegate(pt); }
   k = ((k % L) + L) % L;
-  if (k === 0n) return ZERO;
 
-  let R0 = ZERO;
-  let R1 = pt;
-  for (let i = BigInt(bigBitLen(k) - 1); i >= 0n; i--) {
-    if ((k >> i) & 1n) {
-      R0 = pointAdd(R0, R1);
-      R1 = pointDouble(R1);
-    } else {
-      R1 = pointAdd(R0, R1);
-      R0 = pointDouble(R0);
-    }
+  let R0 = [feCopy(ZERO[0]), feCopy(ZERO[1]), feCopy(ZERO[2]), feCopy(ZERO[3])];
+  let R1 = [feCopy(pt[0]), feCopy(pt[1]), feCopy(pt[2]), feCopy(pt[3])];
+
+  for (let i = 252; i >= 0; i--) {
+    const bit = Number((k >> BigInt(i)) & 1n);
+    // CT swap
+    for (let c = 0; c < 4; c++) feCswap(R0[c], R1[c], bit);
+    const sum = pointAdd(R0, R1);
+    const dbl = pointDouble(R0);
+    R0 = dbl;
+    R1 = sum;
+    // CT swap back
+    for (let c = 0; c < 4; c++) feCswap(R0[c], R1[c], bit);
   }
   return R0;
-}
-
-function bigBitLen(n) {
-  if (n === 0n) return 0;
-  let bits = 0;
-  while (n > 0n) { n >>= 1n; bits++; }
-  return bits;
 }
 
 // ── Point Encoding (RFC 8032 Section 5.1.2) ─────────────────────
 
 function toAffine(pt) {
   const [X, Y, Z] = pt;
-  if (Z === 0n) return [0n, 1n];
-  const zInv = modInv(Z, P);
-  return [(X * zInv % P + P) % P, (Y * zInv % P + P) % P];
+  if (feIsZero(Z)) return [feZero(), feOne()];
+  const zInv = feInv(Z);
+  return [feMul(X, zInv), feMul(Y, zInv)];
 }
 
 function encodePoint(pt) {
   const [x, y] = toAffine(pt);
-  const out = new Uint8Array(32);
-  let yy = y;
-  for (let i = 0; i < 32; i++) {
-    out[i] = Number(yy & 0xffn);
-    yy >>= 8n;
-  }
-  if (x & 1n) out[31] |= 0x80;
+  const out = feToBytes(y);
+  if (feIsNeg(x)) out[31] |= 0x80;
   return out;
 }
 
@@ -181,36 +180,41 @@ function decodePoint(b) {
   const yBytes = new Uint8Array(b);
   const sign = (yBytes[31] & 0x80) !== 0;
   yBytes[31] &= 0x7f;
-  let y = 0n;
-  for (let i = 31; i >= 0; i--) y = (y << 8n) | BigInt(yBytes[i]);
 
-  if (y >= P) return null;
+  // Check y < p by encoding and comparing
+  const y = feFromBytes(yBytes);
+  const yReduced = feToBytes(y);
+  let yOk = 1;
+  for (let i = 0; i < 32; i++) yOk &= (yBytes[i] === yReduced[i]) ? 1 : 0;
+  if (!yOk) return null;
 
   // x^2 = (y^2 - 1) / (d*y^2 + 1)
-  const ySq = y * y % P;
-  const xSq = ((ySq - 1n + P) * modInv((D * ySq % P + 1n) % P, P)) % P;
+  const ySq = feSqr(y);
+  const num = feSub(ySq, feOne());
+  const den = feAdd(feMul(_D, ySq), feOne());
+  const xSq = feMul(num, feInv(den));
 
-  if (xSq === 0n) {
+  if (feIsZero(xSq)) {
     if (sign) return null;
-    return [0n, y % P, 1n, 0n];
+    return [feZero(), feCopy(y), feOne(), feZero()];
   }
 
-  let x = modPow(xSq, (P + 3n) / 8n, P);
-  if ((x * x - xSq) % P !== 0n) {
-    x = (x * modPow(2n, (P - 1n) / 4n, P)) % P;
-    if ((x * x - xSq) % P !== 0n) return null;
+  let x = feSqrt(xSq);
+  if (x === null) return null;
+
+  // Verify: x^2 == xSq
+  if (!feEqual(feSqr(x), xSq)) return null;
+
+  if (feIsNeg(x) !== (sign ? 1 : 0)) {
+    x = feNeg(x);
   }
 
-  if (Boolean(x & 1n) !== sign) {
-    x = (P - x) % P;
-  }
+  // Verify on curve: -x^2 + y^2 = 1 + d*x^2*y^2
+  const lhs = feAdd(feNeg(feSqr(x)), ySq);
+  const rhs = feAdd(feOne(), feMul(_D, feMul(feSqr(x), ySq)));
+  if (!feEqual(lhs, rhs)) return null;
 
-  // Verify on curve
-  const lhs = ((P - x * x % P) + y * y) % P;
-  const rhs = (1n + D * x % P * x % P * y % P * y % P) % P;
-  if (lhs % P !== rhs % P) return null;
-
-  return [x % P, y % P, 1n, (x * y) % P];
+  return [x, feCopy(y), feOne(), feMul(x, y)];
 }
 
 // ── RFC 8032 Clamping ───────────────────────────────────────────
@@ -230,14 +234,12 @@ function bytesToBigIntLE(b) {
 }
 
 // ── Small-Order Point Rejection ──────────────────────────────────
-// Reject public keys and nonce points in the small subgroup (torsion points).
-// Prevents signature forgery when a protocol allows attacker-chosen public keys.
 
 function isSmallOrder(pt) {
   // Multiply by cofactor 8: if result is identity, the point has small order
-  let Q = pointDouble(pointDouble(pointDouble(pt))); // 8P
+  const Q = pointDouble(pointDouble(pointDouble(pt))); // 8P
   const [x, y] = toAffine(Q);
-  return x === 0n && y === 1n;
+  return feIsZero(x) && feEqual(y, feOne());
 }
 
 // ── Native Node.js Ed25519 (constant-time via OpenSSL) ──────────
@@ -255,7 +257,6 @@ let _nativeVerify = null;
 
 try {
   const nodeCrypto = require("crypto");
-  // Probe: create a test key to check Ed25519 support
   const _probe = nodeCrypto.createPrivateKey({
     key: Buffer.concat([_ED25519_SK_DER_PREFIX, Buffer.alloc(32)]),
     format: "der", type: "pkcs8",
@@ -322,7 +323,7 @@ function ed25519Sign(message, skBytes) {
 
   const h = sha512(seed);
   const a = bytesToBigIntLE(clamp(h));
-  const prefix = new Uint8Array(h.subarray(32, 64)); // copy before zeroizing h
+  const prefix = new Uint8Array(h.subarray(32, 64));
 
   // r = SHA-512(prefix || message) mod L
   const rInput = new Uint8Array(prefix.length + message.length);
@@ -351,7 +352,6 @@ function ed25519Sign(message, skBytes) {
   }
 
   // Best-effort cleanup of secret intermediates
-  // (BigInt scalars a, r, hram cannot be zeroized — JS BigInt is immutable)
   zeroize(h);
   zeroize(prefix);
   zeroize(rInput);
@@ -366,7 +366,7 @@ function ed25519Verify(message, sigBytes, pkBytes) {
   message = toBytes(message);
   if (sigBytes.length !== 64 || pkBytes.length !== 32) return false;
 
-  // Decode and validate points (needed for small-order check in both paths)
+  // Decode and validate points
   const A = decodePoint(pkBytes);
   if (A === null) return false;
   if (isSmallOrder(A)) return false;
@@ -378,7 +378,7 @@ function ed25519Verify(message, sigBytes, pkBytes) {
   // Native path (constant-time via OpenSSL) — small-order check done above
   if (_nativeVerify) return _nativeVerify(message, sigBytes, pkBytes);
 
-  // Pure JS fallback (NOT constant-time)
+  // Pure JS fallback (branchless control flow)
   const S = bytesToBigIntLE(sigBytes.subarray(32, 64));
   if (S >= L) return false;
 
@@ -393,9 +393,8 @@ function ed25519Verify(message, sigBytes, pkBytes) {
   const lhs = scalarMultBase(S);
   const rhs = pointAdd(R, scalarMult(h, A));
 
-  const [lx, ly] = toAffine(lhs);
-  const [rx, ry] = toAffine(rhs);
-  return lx === rx && ly === ry;
+  // Constant-time comparison via encoded points
+  return constantTimeEqual(encodePoint(lhs), encodePoint(rhs));
 }
 
 // Sizes

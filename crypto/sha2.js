@@ -3,7 +3,43 @@
 "use strict";
 
 // SHA-256, SHA-512, HMAC, HKDF-Expand, PBKDF2-SHA512.
-// Pure JavaScript, zero dependencies. SHA-512 uses BigInt for 64-bit words.
+// Pure JavaScript fallback. SHA-512 uses BigInt for 64-bit words.
+// When Node.js crypto is available, uses native OpenSSL (constant-time, much faster).
+
+const { toBytes } = require("./utils");
+
+// --- Native Node.js crypto fast paths (SHA-256, SHA-512, HMAC, PBKDF2 via OpenSSL) ---
+
+let _nativeSha256 = null;
+let _nativeSha512 = null;
+let _nativeHmacSha256 = null;
+let _nativeHmacSha512 = null;
+let _nativePbkdf2 = null;
+
+try {
+  const nodeCrypto = require("crypto");
+  _nativeSha256 = (data) => new Uint8Array(nodeCrypto.createHash("sha256").update(data).digest());
+  _nativeSha512 = (data) => new Uint8Array(nodeCrypto.createHash("sha512").update(data).digest());
+  _nativeHmacSha256 = (key, data) => new Uint8Array(
+    nodeCrypto.createHmac("sha256", Buffer.from(key)).update(data).digest()
+  );
+  _nativeHmacSha512 = (key, data) => new Uint8Array(
+    nodeCrypto.createHmac("sha512", Buffer.from(key)).update(data).digest()
+  );
+  if (typeof nodeCrypto.pbkdf2Sync === "function") {
+    _nativePbkdf2 = (password, salt, iterations, dkLen) => {
+      return new Uint8Array(nodeCrypto.pbkdf2Sync(
+        Buffer.from(password),
+        Buffer.from(salt),
+        iterations,
+        dkLen,
+        "sha512"
+      ));
+    };
+  }
+} catch (_) {
+  // Native crypto not available — pure JS fallback (e.g. browser)
+}
 
 // --- SHA-256 ---
 
@@ -22,6 +58,7 @@ function rotr32(x, n) { return ((x >>> n) | (x << (32 - n))) >>> 0; }
 
 function sha256(data) {
   const bytes = toBytes(data);
+  if (_nativeSha256) return _nativeSha256(bytes);
 
   // Pre-processing: padding
   const bitLen = bytes.length * 8;
@@ -113,6 +150,7 @@ function rotr64(x, n) {
 
 function sha512(data) {
   const bytes = toBytes(data);
+  if (_nativeSha512) return _nativeSha512(bytes);
 
   // Pre-processing: padding
   const bitLen = BigInt(bytes.length) * 8n;
@@ -186,6 +224,7 @@ function sha512(data) {
 function hmacSha256(key, data) {
   key = toBytes(key);
   data = toBytes(data);
+  if (_nativeHmacSha256) return _nativeHmacSha256(key, data);
 
   const blockSize = 64;
   if (key.length > blockSize) key = sha256(key);
@@ -213,6 +252,7 @@ function hmacSha256(key, data) {
 function hmacSha512(key, data) {
   key = toBytes(key);
   data = toBytes(data);
+  if (_nativeHmacSha512) return _nativeHmacSha512(key, data);
 
   const blockSize = 128;
   if (key.length > blockSize) key = sha512(key);
@@ -241,7 +281,7 @@ function hmacSha512(key, data) {
 
 function hkdfExpand(prk, info, length) {
   prk = toBytes(prk);
-  info = toBytes(info);
+  info = info == null ? new Uint8Array(0) : toBytes(info);
 
   const hashLen = 64; // SHA-512
   if (length > 255 * hashLen) throw new Error("HKDF-Expand length exceeds 255 * HashLen");
@@ -264,15 +304,17 @@ function hkdfExpand(prk, info, length) {
 // --- HKDF-Extract (RFC 5869, SHA-256) ---
 
 function hkdfExtractSha256(salt, ikm) {
-  if (!salt || salt.length === 0) salt = new Uint8Array(32);
-  return hmacSha256(salt, toBytes(ikm));
+  const ikmBytes = toBytes(ikm);
+  let saltBytes = salt == null ? new Uint8Array(0) : toBytes(salt);
+  if (saltBytes.length === 0) saltBytes = new Uint8Array(32); // RFC 5869: empty salt → HashLen zeros
+  return hmacSha256(saltBytes, ikmBytes);
 }
 
 // --- HKDF-Expand (SHA-256 variant, for AES key derivation) ---
 
 function hkdfExpandSha256(prk, info, length) {
   prk = toBytes(prk);
-  info = toBytes(info);
+  info = info == null ? new Uint8Array(0) : toBytes(info);
 
   const hashLen = 32; // SHA-256
   if (length > 255 * hashLen) throw new Error("HKDF-Expand length exceeds 255 * HashLen");
@@ -293,25 +335,6 @@ function hkdfExpandSha256(prk, info, length) {
 }
 
 // --- PBKDF2-SHA512 ---
-
-// Native Node.js crypto fast path for PBKDF2 (OpenSSL, orders of magnitude faster)
-let _nativePbkdf2 = null;
-try {
-  const nodeCrypto = require("crypto");
-  if (typeof nodeCrypto.pbkdf2Sync === "function") {
-    _nativePbkdf2 = (password, salt, iterations, dkLen) => {
-      return new Uint8Array(nodeCrypto.pbkdf2Sync(
-        Buffer.from(password),
-        Buffer.from(salt),
-        iterations,
-        dkLen,
-        "sha512"
-      ));
-    };
-  }
-} catch (_) {
-  // Native PBKDF2 not available — pure JS fallback
-}
 
 function pbkdf2Sha512(password, salt, iterations, dkLen) {
   password = toBytes(password);
@@ -353,17 +376,6 @@ function pbkdf2Sha512(password, salt, iterations, dkLen) {
   }
 
   return output.subarray(0, dkLen);
-}
-
-// --- Utility ---
-
-function toBytes(data) {
-  if (data instanceof Uint8Array) return data;
-  if (typeof data === "string") return new TextEncoder().encode(data);
-  if (Array.isArray(data)) return new Uint8Array(data);
-  if (data instanceof ArrayBuffer) return new Uint8Array(data);
-  if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-  throw new Error("sha2: unsupported input type");
 }
 
 // --- Async PBKDF2-SHA512 (WebCrypto fast path for browsers) ---

@@ -33,12 +33,13 @@
 //     - Signing defaults to hedged mode (rnd generated via CSPRNG)
 //       as recommended by FIPS 204. Pass deterministic:true for reproducible
 //       signatures (uses rnd=0^32).
-//     - NOT constant-time: JavaScript arithmetic and branching on secret values
-//       leak timing information. For deployments where side-channel attacks are
-//       a concern, use a vetted constant-time C/Rust implementation instead.
+//     - Best-effort constant-time: all control flow is branchless (no
+//       secret-dependent branches). Integer arithmetic is fixed-time.
+//       For deployments where hardware side-channel attacks are a concern,
+//       use a vetted constant-time C/Rust implementation instead.
 
 const { shake128, shake256, shake128Xof, shake256Xof } = require("./sha3");
-const { randomBytes, zeroize, toBytes } = require("./utils");
+const { randomBytes, zeroize, toBytes, constantTimeEqual } = require("./utils");
 
 function zeroizeVec(v) {
   for (let i = 0; i < v.length; i++) zeroize(v[i]);
@@ -110,10 +111,10 @@ const SIG_SIZE = C_TILDE_BYTES + L * 640 + OMEGA + K; // 48 + 3200 + 61 = 3309
 
 // -- Modular Arithmetic Helpers -----------------------------------------------
 
-// JavaScript % can return negative values. This ensures result in [0, Q).
+// JavaScript % can return negative values. Branchless fixup ensures result in [0, m).
 function mod(a, m) {
   const r = a % m;
-  return r < 0 ? r + m : r;
+  return r + (m & (r >> 31)); // add m when r is negative (sign bit = 1)
 }
 
 // -- NTT Operations -----------------------------------------------------------
@@ -466,11 +467,8 @@ function sampleInBall(cTilde) {
     } else {
       sign = (signHi >>> (bitIdx - 32)) & 1;
     }
-    if (sign === 1) {
-      c[j] = Q - 1; // -1 mod q
-    } else {
-      c[j] = 1;
-    }
+    // Branchless: sign=0 → 1, sign=1 → Q-1
+    c[j] = 1 + sign * (Q - 2);
   }
   return c;
 }
@@ -483,10 +481,10 @@ function sampleInBall(cTilde) {
  */
 function power2Round(r) {
   const rPos = mod(r, Q);
-  let r0 = rPos % (1 << D);
-  if (r0 > (1 << (D - 1))) {
-    r0 -= (1 << D);
-  }
+  let r0 = rPos & ((1 << D) - 1);
+  // Branchless centering: subtract 2^D when r0 > 2^(D-1)
+  const gt = ((1 << (D - 1)) - r0) >> 31 & 1; // 1 if r0 > 2^(D-1)
+  r0 -= gt << D;
   const r1 = (rPos - r0) >> D;
   return [r1, r0];
 }
@@ -498,16 +496,15 @@ function power2Round(r) {
 function decompose(r) {
   const rPos = mod(r, Q);
   let r0 = rPos % (2 * GAMMA2);
-  if (r0 > GAMMA2) {
-    r0 -= 2 * GAMMA2;
-  }
-  let r1;
-  if (rPos - r0 === Q - 1) {
-    r1 = 0;
-    r0 -= 1;
-  } else {
-    r1 = (rPos - r0) / (2 * GAMMA2) | 0;
-  }
+  // Branchless centering: subtract 2*GAMMA2 when r0 > GAMMA2
+  const gt = ((GAMMA2 - r0) >> 31) & 1;
+  r0 -= gt * 2 * GAMMA2;
+  // Branchless special case: when rPos - r0 === Q - 1, set r1=0 and r0-=1
+  const diff = (rPos - r0) - (Q - 1);
+  const isMax = 1 - (((diff | (-diff)) >>> 31) & 1); // 1 if diff===0
+  const r1Normal = ((rPos - r0) / (2 * GAMMA2)) | 0;
+  const r1 = (1 - isMax) * r1Normal;
+  r0 -= isMax;
   return [r1, r0];
 }
 
@@ -525,7 +522,9 @@ function lowBits(r) {
 function makeHint(z, r) {
   const r1 = highBits(r);
   const v1 = highBits((r + z) % Q);
-  return r1 === v1 ? 0 : 1;
+  // Branchless: (diff | -diff) >>> 31 is 1 when diff !== 0, 0 when diff === 0
+  const diff = r1 - v1;
+  return ((diff | (-diff)) >>> 31) & 1;
 }
 
 /**
@@ -535,9 +534,10 @@ function makeHint(z, r) {
 function useHint(h, r) {
   const m = ((Q - 1) / (2 * GAMMA2)) | 0; // = 16 for ML-DSA-65
   const [r1, r0] = decompose(r);
-  if (h === 0) return r1;
-  if (r0 > 0) return (r1 + 1) % m;
-  return mod(r1 - 1, m);
+  // Branchless: direction = +1 when r0 > 0, -1 when r0 <= 0
+  const gtZero = 1 - (((r0 - 1) >> 31) & 1); // 1 if r0 > 0, 0 if r0 <= 0
+  const direction = gtZero * 2 - 1; // +1 or -1
+  return mod(r1 + h * direction, m);
 }
 
 // -- Bit Packing / Encoding --------------------------------------------------
@@ -862,8 +862,8 @@ function mlSignInternal(message, skBytes, rnd, deterministic) {
     throw new Error("secret key must be " + SK_SIZE + " bytes, got " + skBytes.length);
   }
   if (rnd != null) {
-    if (rnd.length !== 32) {
-      throw new Error("rnd must be 32 bytes, got " + rnd.length);
+    if (!(rnd instanceof Uint8Array) || rnd.length !== 32) {
+      throw new Error("rnd must be a 32-byte Uint8Array, got " + (rnd ? rnd.length : 0));
     }
   }
 
@@ -882,9 +882,10 @@ function mlSignInternal(message, skBytes, rnd, deterministic) {
   const mu = shake256(concatBytes(tr, message), 64);
 
   // Step 5: rho'' = H(K || rnd || mu) (FIPS 204 Algorithm 7)
+  // Always allocate our own copy so zeroize() never wipes the caller's buffer.
   let rndBytes;
   if (rnd != null) {
-    rndBytes = rnd;
+    rndBytes = new Uint8Array(rnd); // defensive copy — caller keeps their buffer
   } else if (deterministic) {
     rndBytes = new Uint8Array(32); // all zeros
   } else {
@@ -938,28 +939,28 @@ function mlSignInternal(message, skBytes, rnd, deterministic) {
     const cs2Inv = vecInvNtt(cs2);
     const wMinusCs2 = vecSub(w, cs2Inv);
 
-    // 6g: Check z norm bound
-    let reject = false;
-    for (let i = 0; i < L && !reject; i++) {
+    // 6g: Check z norm bound (branchless: no early break on secret data)
+    let reject = 0;
+    for (let i = 0; i < L; i++) {
       for (let j = 0; j < N; j++) {
         let val = z[i][j];
-        if (val > (Q >> 1)) val = Q - val;
-        if (val >= GAMMA1 - BETA) {
-          reject = true;
-          break;
-        }
+        // CT abs (centered mod Q): val = val > Q/2 ? Q - val : val
+        const neg = ((Q >> 1) - val) >> 31; // -1 if val > Q/2, 0 otherwise
+        val = val + ((Q - 2 * val) & neg);
+        // CT compare: reject if val >= GAMMA1 - BETA
+        reject |= ((GAMMA1 - BETA - 1 - val) >> 31) & 1;
       }
     }
     if (reject) { zeroizeVec(y); continue; }
 
-    // 6h: Check ||r0||_inf < gamma2 - beta
-    for (let i = 0; i < K && !reject; i++) {
+    // 6h: Check ||r0||_inf < gamma2 - beta (branchless)
+    for (let i = 0; i < K; i++) {
       for (let j = 0; j < N; j++) {
         const lb = lowBits(wMinusCs2[i][j]);
-        if (Math.abs(lb) >= GAMMA2 - BETA) {
-          reject = true;
-          break;
-        }
+        // CT abs: abs(lb) = (lb ^ (lb >> 31)) - (lb >> 31)
+        const lbSign = lb >> 31;
+        const absLb = (lb ^ lbSign) - lbSign;
+        reject |= ((GAMMA2 - BETA - 1 - absLb) >> 31) & 1;
       }
     }
     if (reject) { zeroizeVec(y); continue; }
@@ -982,16 +983,14 @@ function mlSignInternal(message, skBytes, rnd, deterministic) {
     }
     if (hintCount > OMEGA) { zeroizeVec(y); continue; }
 
-    // 6j: Check ct0 norm bound
-    reject = false;
-    for (let i = 0; i < K && !reject; i++) {
+    // 6j: Check ct0 norm bound (branchless)
+    reject = 0;
+    for (let i = 0; i < K; i++) {
       for (let j = 0; j < N; j++) {
         let val = ct0Inv[i][j];
-        if (val > (Q >> 1)) val = Q - val;
-        if (val >= GAMMA2) {
-          reject = true;
-          break;
-        }
+        const neg2 = ((Q >> 1) - val) >> 31;
+        val = val + ((Q - 2 * val) & neg2);
+        reject |= ((GAMMA2 - 1 - val) >> 31) & 1;
       }
     }
     if (reject) { zeroizeVec(y); continue; }
@@ -1033,9 +1032,7 @@ function mlVerifyInternal(message, sigBytes, pkBytes) {
   // Canonical encoding check: re-encode pk and verify round-trip match
   // Rejects non-canonical bit patterns (e.g. stray bits in padding bytes)
   const pkReencoded = pkEncode(rho, t1);
-  let pkDiff = 0;
-  for (let i = 0; i < pkBytes.length; i++) pkDiff |= pkBytes[i] ^ pkReencoded[i];
-  if (pkDiff !== 0) return false;
+  if (!constantTimeEqual(pkBytes, pkReencoded)) return false;
 
   // Step 2: Decode signature
   const decoded = sigDecode(sigBytes);
@@ -1111,13 +1108,8 @@ function mlVerifyInternal(message, sigBytes, pkBytes) {
   const w1Packed = concatBytes.apply(null, w1Parts);
   const cTildeCheck = shake256(concatBytes(mu, w1Packed), C_TILDE_BYTES);
 
-  // Constant-ish time comparison (not truly constant-time in JS)
-  if (cTilde.length !== cTildeCheck.length) return false;
-  let diff = 0;
-  for (let i = 0; i < cTilde.length; i++) {
-    diff |= cTilde[i] ^ cTildeCheck[i];
-  }
-  return diff === 0;
+  // Uses Node's timingSafeEqual when available, JS XOR-accumulate fallback
+  return constantTimeEqual(cTilde, cTildeCheck);
 }
 
 /**

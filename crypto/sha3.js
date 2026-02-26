@@ -3,7 +3,10 @@
 "use strict";
 
 // Keccak-f[1600] sponge construction — SHA3-256, SHA3-512, SHAKE-128, SHAKE-256.
-// Pure JavaScript, zero dependencies. Uses BigInt for 64-bit lane arithmetic.
+// Pure JavaScript, uses BigInt for 64-bit lane arithmetic.
+// Falls back to pure JS when Node.js native crypto is unavailable (e.g. browser).
+
+const { toBytes } = require("./utils");
 
 // --- Round constants (24 rounds) ---
 
@@ -148,15 +151,6 @@ function keccakSponge(rate, data, outputLen, suffix) {
   }
 
   return output;
-}
-
-function toBytes(data) {
-  if (data instanceof Uint8Array) return data;
-  if (typeof data === "string") return new TextEncoder().encode(data);
-  if (Array.isArray(data)) return new Uint8Array(data);
-  if (data instanceof ArrayBuffer) return new Uint8Array(data);
-  if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-  throw new Error("sha3: unsupported input type");
 }
 
 // --- Native Node.js crypto fast path (SHAKE/SHA3 via OpenSSL) ---
@@ -320,7 +314,8 @@ class ShakeXofNative {
 
   absorb(data) {
     if (this._cache !== null) throw new Error("Already finalized");
-    this._parts.push(toBytes(data));
+    const bytes = toBytes(data);
+    this._parts.push(new Uint8Array(bytes)); // defensive copy — caller may mutate input
     return this;
   }
 

@@ -20,7 +20,7 @@
 //     Public key:  1,984 bytes  (Ed25519 pk 32B + ML-DSA-65 pk 1,952B)
 //     Signature:   3,373 bytes  (Ed25519 sig 64B + ML-DSA-65 sig 3,309B)
 //
-// NOT constant-time. For side-channel-resistant deployments, use C/Rust.
+// Best-effort constant-time. For hardware side-channel resistance, use C/Rust.
 
 const { ed25519Keygen, ed25519Sign, ed25519Verify } = require("./ed25519");
 const { mlKeygen, mlSign, mlVerify } = require("./ml_dsa");
@@ -137,12 +137,12 @@ function hybridDsaVerify(message, sig, pk, ctx) {
   const edPk = pk.subarray(0, _ED25519_PK);
   const mlPk = pk.subarray(_ED25519_PK);
 
-  // Both components verify against the same domain-prefixed message
+  // Both components verify against the same domain-prefixed message.
+  // Constant-time: always run both verifications (no early return on first failure).
   const msg = _hybridMessage(message, ctx);
-  if (!ed25519Verify(msg, edSig, edPk)) return false;
-  if (!mlVerify(msg, mlSig, mlPk)) return false;
-
-  return true;
+  const edOk = ed25519Verify(msg, edSig, edPk);
+  const mlOk = mlVerify(msg, mlSig, mlPk);
+  return edOk && mlOk;
 }
 
 module.exports = {
