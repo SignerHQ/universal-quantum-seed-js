@@ -244,18 +244,17 @@ function isSmallOrder(pt) {
 
 // ── Native Node.js Ed25519 (constant-time via OpenSSL) ──────────
 
-const _ED25519_SK_DER_PREFIX = Buffer.from(
-  "302e020100300506032b657004220420", "hex"
-);
-const _ED25519_PK_DER_PREFIX = Buffer.from(
-  "302a300506032b6570032100", "hex"
-);
-
 let _nativeKeygen = null;
 let _nativeSign = null;
 let _nativeVerify = null;
 
 try {
+  const _ED25519_SK_DER_PREFIX = Buffer.from(
+    "302e020100300506032b657004220420", "hex"
+  );
+  const _ED25519_PK_DER_PREFIX = Buffer.from(
+    "302a300506032b6570032100", "hex"
+  );
   const nodeCrypto = require("crypto");
   const _probe = nodeCrypto.createPrivateKey({
     key: Buffer.concat([_ED25519_SK_DER_PREFIX, Buffer.alloc(32)]),

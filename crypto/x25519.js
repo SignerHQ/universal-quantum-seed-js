@@ -92,17 +92,16 @@ function x25519Raw(kBytes, uBytes) {
 
 // ── Native Node.js X25519 (constant-time via OpenSSL) ───────────
 
-const _X25519_SK_DER_PREFIX = Buffer.from(
-  "302e020100300506032b656e04220420", "hex"
-);
-const _X25519_PK_DER_PREFIX = Buffer.from(
-  "302a300506032b656e032100", "hex"
-);
-
 let _nativeX25519Keygen = null;
 let _nativeX25519DH = null;
 
 try {
+  const _X25519_SK_DER_PREFIX = Buffer.from(
+    "302e020100300506032b656e04220420", "hex"
+  );
+  const _X25519_PK_DER_PREFIX = Buffer.from(
+    "302a300506032b656e032100", "hex"
+  );
   const nodeCrypto = require("crypto");
   // Probe: create a test X25519 key
   const _probe = Buffer.concat([_X25519_SK_DER_PREFIX, Buffer.alloc(32)]);

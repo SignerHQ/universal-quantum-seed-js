@@ -55,7 +55,7 @@ function build() {
 // MIT License — (c) 2026 Signer.io
 //
 // Usage:
-//   <script src="uqs.js"></script>
+//   <script src="uqs.js"><\/script>
 //   const { generateWords, getSeed, getSeedAsync, resolve } = UQS;
 //
 // Or as ES module:

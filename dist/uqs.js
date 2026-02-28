@@ -2037,18 +2037,17 @@ function isSmallOrder(pt) {
 
 // ── Native Node.js Ed25519 (constant-time via OpenSSL) ──────────
 
-const _ED25519_SK_DER_PREFIX = Buffer.from(
-  "302e020100300506032b657004220420", "hex"
-);
-const _ED25519_PK_DER_PREFIX = Buffer.from(
-  "302a300506032b6570032100", "hex"
-);
-
 let _nativeKeygen = null;
 let _nativeSign = null;
 let _nativeVerify = null;
 
 try {
+  const _ED25519_SK_DER_PREFIX = Buffer.from(
+    "302e020100300506032b657004220420", "hex"
+  );
+  const _ED25519_PK_DER_PREFIX = Buffer.from(
+    "302a300506032b6570032100", "hex"
+  );
   const nodeCrypto = require("crypto");
   const _probe = nodeCrypto.createPrivateKey({
     key: Buffer.concat([_ED25519_SK_DER_PREFIX, Buffer.alloc(32)]),
@@ -2303,17 +2302,16 @@ function x25519Raw(kBytes, uBytes) {
 
 // ── Native Node.js X25519 (constant-time via OpenSSL) ───────────
 
-const _X25519_SK_DER_PREFIX = Buffer.from(
-  "302e020100300506032b656e04220420", "hex"
-);
-const _X25519_PK_DER_PREFIX = Buffer.from(
-  "302a300506032b656e032100", "hex"
-);
-
 let _nativeX25519Keygen = null;
 let _nativeX25519DH = null;
 
 try {
+  const _X25519_SK_DER_PREFIX = Buffer.from(
+    "302e020100300506032b656e04220420", "hex"
+  );
+  const _X25519_PK_DER_PREFIX = Buffer.from(
+    "302a300506032b656e032100", "hex"
+  );
   const nodeCrypto = require("crypto");
   // Probe: create a test X25519 key
   const _probe = Buffer.concat([_X25519_SK_DER_PREFIX, Buffer.alloc(32)]);

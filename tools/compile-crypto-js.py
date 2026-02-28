@@ -324,7 +324,7 @@ IIFE_HEADER = """\
 // No wordlists, no word resolution, no language data (~75% smaller).
 //
 // Usage:
-//   <script src="uqs-crypto.js"></script>
+//   <script src="uqs-crypto.js"><\\/script>
 //   const {{ mlKeygen, ed25519Sign, getSeed }} = UQS;
 //
 // Or as ES module:
