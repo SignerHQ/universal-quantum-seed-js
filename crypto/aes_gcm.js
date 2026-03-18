@@ -126,11 +126,22 @@ function aesBlock(s, rk) {
 
 // --- GCM internals ---
 
+// NIST SP 800-38D maximum: 2^39 - 256 bits = (2^36 - 32) bytes
+const MAX_PLAINTEXT_BYTES = (1 << 36) - 32;
+
 function incCtr(ctr) {
   for (let i = 15; i >= 12; i--) {
     ctr[i] = (ctr[i] + 1) & 0xff;
-    if (ctr[i] !== 0) break;
+    if (ctr[i] !== 0) return;
   }
+  throw new Error(
+    "AES-GCM: 32-bit counter exhausted (2^32 blocks). " +
+    "Plaintext exceeds the NIST SP 800-38D maximum (~64 GB)."
+  );
+}
+
+function wipeBuf(buf) {
+  if (buf && typeof buf.fill === "function") buf.fill(0);
 }
 
 function ghashMul(X, Y) {
@@ -206,44 +217,50 @@ function aesGcmEncrypt(key, nonce, plaintext, aad) {
 
   if (key.length !== 32) throw new Error("Key must be 32 bytes, got " + key.length);
   if (nonce.length !== 12) throw new Error("Nonce must be 12 bytes, got " + nonce.length);
+  if (plaintext.length > MAX_PLAINTEXT_BYTES) {
+    throw new Error("Plaintext (" + plaintext.length + " bytes) exceeds NIST SP 800-38D maximum");
+  }
 
   if (_nativeEncrypt) return _nativeEncrypt(key, nonce, plaintext, aad);
 
   // Pure-JS fallback
   const rk = keyExpansion(key);
-
-  // H = AES_K(0^128)
   const H = new Uint8Array(16);
   aesBlock(H, rk);
 
-  // J0 = nonce || 0x00000001
-  const J0 = new Uint8Array(16);
-  J0.set(nonce);
-  J0[15] = 1;
+  try {
+    // J0 = nonce || 0x00000001
+    const J0 = new Uint8Array(16);
+    J0.set(nonce);
+    J0[15] = 1;
 
-  // Encrypt with AES-CTR starting at J0+1
-  const ct = new Uint8Array(plaintext.length);
-  const ctr = new Uint8Array(J0);
-  for (let off = 0; off < plaintext.length; off += 16) {
-    incCtr(ctr);
-    const ks = new Uint8Array(ctr);
-    aesBlock(ks, rk);
-    const end = Math.min(16, plaintext.length - off);
-    for (let i = 0; i < end; i++) ct[off + i] = plaintext[off + i] ^ ks[i];
+    // Encrypt with AES-CTR starting at J0+1
+    const ct = new Uint8Array(plaintext.length);
+    const ctr = new Uint8Array(J0);
+    for (let off = 0; off < plaintext.length; off += 16) {
+      incCtr(ctr);
+      const ks = new Uint8Array(ctr);
+      aesBlock(ks, rk);
+      const end = Math.min(16, plaintext.length - off);
+      for (let i = 0; i < end; i++) ct[off + i] = plaintext[off + i] ^ ks[i];
+    }
+
+    // Compute tag
+    const ghashInput = buildGhashInput(aad, ct);
+    const tag = ghash(H, ghashInput);
+    const encJ0 = new Uint8Array(J0);
+    aesBlock(encJ0, rk);
+    for (let i = 0; i < 16; i++) tag[i] ^= encJ0[i];
+
+    // Return ct || tag
+    const result = new Uint8Array(ct.length + 16);
+    result.set(ct, 0);
+    result.set(tag, ct.length);
+    return result;
+  } finally {
+    wipeBuf(rk);
+    wipeBuf(H);
   }
-
-  // Compute tag
-  const ghashInput = buildGhashInput(aad, ct);
-  const tag = ghash(H, ghashInput);
-  const encJ0 = new Uint8Array(J0);
-  aesBlock(encJ0, rk);
-  for (let i = 0; i < 16; i++) tag[i] ^= encJ0[i];
-
-  // Return ct || tag
-  const result = new Uint8Array(ct.length + 16);
-  result.set(ct, 0);
-  result.set(tag, ct.length);
-  return result;
 }
 
 /**
@@ -266,6 +283,10 @@ function aesGcmDecrypt(key, nonce, ciphertextWithTag, aad) {
   if (nonce.length !== 12) throw new Error("Nonce must be 12 bytes, got " + nonce.length);
   if (ciphertextWithTag.length < 16) throw new Error("Ciphertext too short (must include 16-byte tag)");
 
+  if (ciphertextWithTag.length - 16 > MAX_PLAINTEXT_BYTES) {
+    throw new Error("Ciphertext payload (" + (ciphertextWithTag.length - 16) + " bytes) exceeds NIST SP 800-38D maximum");
+  }
+
   if (_nativeDecrypt) return _nativeDecrypt(key, nonce, ciphertextWithTag, aad);
 
   // Pure-JS fallback
@@ -273,40 +294,43 @@ function aesGcmDecrypt(key, nonce, ciphertextWithTag, aad) {
   const receivedTag = ciphertextWithTag.slice(ciphertextWithTag.length - 16);
 
   const rk = keyExpansion(key);
-
-  // H = AES_K(0^128)
   const H = new Uint8Array(16);
   aesBlock(H, rk);
 
-  // J0 = nonce || 0x00000001
-  const J0 = new Uint8Array(16);
-  J0.set(nonce);
-  J0[15] = 1;
+  try {
+    // J0 = nonce || 0x00000001
+    const J0 = new Uint8Array(16);
+    J0.set(nonce);
+    J0[15] = 1;
 
-  // Verify tag
-  const ghashInput = buildGhashInput(aad, ct);
-  const computedTag = ghash(H, ghashInput);
-  const encJ0 = new Uint8Array(J0);
-  aesBlock(encJ0, rk);
-  for (let i = 0; i < 16; i++) computedTag[i] ^= encJ0[i];
+    // Verify tag
+    const ghashInput = buildGhashInput(aad, ct);
+    const computedTag = ghash(H, ghashInput);
+    const encJ0 = new Uint8Array(J0);
+    aesBlock(encJ0, rk);
+    for (let i = 0; i < 16; i++) computedTag[i] ^= encJ0[i];
 
-  // Constant-time tag comparison
-  let diff = 0;
-  for (let i = 0; i < 16; i++) diff |= computedTag[i] ^ receivedTag[i];
-  if (diff !== 0) throw new Error("AES-GCM: authentication tag mismatch");
+    // Constant-time tag comparison
+    let diff = 0;
+    for (let i = 0; i < 16; i++) diff |= computedTag[i] ^ receivedTag[i];
+    if (diff !== 0) throw new Error("AES-GCM: authentication tag mismatch");
 
-  // Decrypt
-  const plaintext = new Uint8Array(ct.length);
-  const ctr = new Uint8Array(J0);
-  for (let off = 0; off < ct.length; off += 16) {
-    incCtr(ctr);
-    const ks = new Uint8Array(ctr);
-    aesBlock(ks, rk);
-    const end = Math.min(16, ct.length - off);
-    for (let i = 0; i < end; i++) plaintext[off + i] = ct[off + i] ^ ks[i];
+    // Decrypt
+    const plaintext = new Uint8Array(ct.length);
+    const ctr = new Uint8Array(J0);
+    for (let off = 0; off < ct.length; off += 16) {
+      incCtr(ctr);
+      const ks = new Uint8Array(ctr);
+      aesBlock(ks, rk);
+      const end = Math.min(16, ct.length - off);
+      for (let i = 0; i < end; i++) plaintext[off + i] = ct[off + i] ^ ks[i];
+    }
+
+    return plaintext;
+  } finally {
+    wipeBuf(rk);
+    wipeBuf(H);
   }
-
-  return plaintext;
 }
 
 module.exports = { aesGcmEncrypt, aesGcmDecrypt };

@@ -484,9 +484,15 @@ function collectEntropy(nBytes, extraEntropy) {
   // HKDF-Extract: condense the entropy pool into a PRK
   const prk = hmacSha512(DOMAIN, pool);
 
+  // Wipe the entropy pool now that it's been hashed
+  zeroize(pool);
+  for (const p of parts) zeroize(p);
+
   // HKDF-Expand: stretch to arbitrary output length
   const info = concatBytes(DOMAIN, toBytes("-entropy"));
-  return hkdfExpand(prk, info, nBytes);
+  const result = hkdfExpand(prk, info, nBytes);
+  zeroize(prk);
+  return result;
 }
 
 // ── Checksum ────────────────────────────────────────────────────
@@ -639,7 +645,10 @@ async function getSeedAsync(words, passphrase = "") {
 
 function getProfile(masterKey, profilePassword) {
   if (!profilePassword) return masterKey;
-  const payload = concatBytes(DOMAIN, toBytes("-profile"), toBytes(profilePassword));
+  // NFKC normalization prevents cross-platform derivation differences
+  // (e.g., macOS NFD vs Windows NFC for accented characters)
+  const normalizedPw = profilePassword.normalize("NFKC");
+  const payload = concatBytes(DOMAIN, toBytes("-profile"), toBytes(normalizedPw));
   const derived = hmacSha512(masterKey, payload);
   zeroize(payload);
   return derived;
