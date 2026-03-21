@@ -11,9 +11,11 @@
 // Ed25519 provides classical (pre-quantum) security (~128-bit).
 // ML-DSA-65 provides post-quantum security (NIST Level 3, ~192-bit).
 //
-// Stripping resistance: both components sign a domain-prefixed message
-// ("hybrid-dsa-v1" || len(ctx) || ctx || message), preventing extraction of
-// either component signature for standalone use outside the hybrid context.
+// Stripping resistance: BOTH component signatures are domain-separated so
+// neither can be extracted and used as a valid standalone signature:
+//     Ed25519 signs: "hybrid-dsa-v1" || len(ctx) || ctx || message
+//     ML-DSA uses ctx: "hybrid-dsa-v1" || 0x00 || ctx (within FIPS 204
+//       pure-mode formatting, which prepends 0x00 || len(ctx) internally)
 //
 // Sizes:
 //     Secret key:  4,096 bytes  (Ed25519 sk 64B + ML-DSA-65 sk 4,032B)
@@ -23,7 +25,7 @@
 // Best-effort constant-time. For hardware side-channel resistance, use C/Rust.
 
 const { ed25519Keygen, ed25519Sign, ed25519Verify } = require("./ed25519");
-const { mlKeygen, mlSign, mlVerify } = require("./ml_dsa");
+const { mlKeygen, mlSignWithContext, mlVerifyWithContext } = require("./ml_dsa");
 const { toBytes, zeroize } = require("./utils");
 
 // Component sizes
@@ -40,19 +42,30 @@ const HYBRID_DSA_PK_SIZE = _ED25519_PK + _ML_DSA_PK;    // 1,984
 const HYBRID_DSA_SIG_SIZE = _ED25519_SIG + _ML_DSA_SIG;  // 3,373
 
 // Domain prefix for stripping resistance.
-// Both Ed25519 and ML-DSA sign this same domain-prefixed byte string,
-// preventing extraction of either component signature for standalone use.
 const _DOMAIN = new TextEncoder().encode("hybrid-dsa-v1");
 
-function _hybridMessage(message, ctx) {
-  if (ctx.length > 255) {
-    throw new Error(`Context string must be 0-255 bytes, got ${ctx.length}`);
+// Ed25519 message: domain || len(ctx) || ctx || message
+// Prevents Ed25519 signature from being used standalone.
+function _ed25519Message(message, ctx) {
+  if (ctx.length > 241) {
+    throw new Error(`Context string must be 0-241 bytes, got ${ctx.length}`);
   }
   const out = new Uint8Array(_DOMAIN.length + 1 + ctx.length + message.length);
   out.set(_DOMAIN);
   out[_DOMAIN.length] = ctx.length;
   out.set(ctx, _DOMAIN.length + 1);
   out.set(message, _DOMAIN.length + 1 + ctx.length);
+  return out;
+}
+
+// ML-DSA context: domain || 0x00 || ctx
+// Used as FIPS 204 pure-mode context. The 0x00 separator prevents
+// ambiguity with the Ed25519 component's length prefix.
+function _mlDsaCtx(ctx) {
+  const out = new Uint8Array(_DOMAIN.length + 1 + ctx.length);
+  out.set(_DOMAIN);
+  out[_DOMAIN.length] = 0x00;
+  out.set(ctx, _DOMAIN.length + 1);
   return out;
 }
 
@@ -100,14 +113,14 @@ function hybridDsaSign(message, sk, ctx) {
   const edSk = sk.subarray(0, _ED25519_SK);
   const mlSk = sk.subarray(_ED25519_SK);
 
-  // Both components sign the same domain-prefixed message.
-  // This ensures neither signature can be used standalone outside the hybrid context.
-  const msg = _hybridMessage(message, ctx);
+  // Ed25519: signs domain-prefixed message (stripping resistance)
+  const edMsg = _ed25519Message(message, ctx);
+  const edSig = ed25519Sign(edMsg, edSk);
+  zeroize(edMsg);
 
-  const edSig = ed25519Sign(msg, edSk);
-  const mlSig = mlSign(msg, mlSk);
-
-  zeroize(msg);
+  // ML-DSA: signs raw message with domain-separated context (FIPS 204 pure mode)
+  const mlCtx = _mlDsaCtx(ctx);
+  const mlSig = mlSignWithContext(message, mlSk, mlCtx);
 
   const sig = new Uint8Array(HYBRID_DSA_SIG_SIZE);
   sig.set(edSig);
@@ -137,11 +150,14 @@ function hybridDsaVerify(message, sig, pk, ctx) {
   const edPk = pk.subarray(0, _ED25519_PK);
   const mlPk = pk.subarray(_ED25519_PK);
 
-  // Both components verify against the same domain-prefixed message.
-  // Constant-time: always run both verifications (no early return on first failure).
-  const msg = _hybridMessage(message, ctx);
-  const edOk = ed25519Verify(msg, edSig, edPk);
-  const mlOk = mlVerify(msg, mlSig, mlPk);
+  // Ed25519: verify domain-prefixed message
+  const edMsg = _ed25519Message(message, ctx);
+  const edOk = ed25519Verify(edMsg, edSig, edPk);
+
+  // ML-DSA: verify raw message with domain-separated context (FIPS 204 pure mode)
+  const mlCtx = _mlDsaCtx(ctx);
+  const mlOk = mlVerifyWithContext(message, mlSig, mlPk, mlCtx);
+
   return edOk && mlOk;
 }
 
