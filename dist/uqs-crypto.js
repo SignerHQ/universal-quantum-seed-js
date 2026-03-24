@@ -5842,7 +5842,8 @@ function aesBlock(s, rk) {
 // --- GCM internals ---
 
 // NIST SP 800-38D maximum: 2^39 - 256 bits = (2^36 - 32) bytes
-const MAX_PLAINTEXT_BYTES = (1 << 36) - 32;
+// NOTE: Must use Math.pow — JS bitwise shifts truncate to 32 bits.
+const MAX_PLAINTEXT_BYTES = Math.pow(2, 36) - 32;
 
 function incCtr(ctr) {
   for (let i = 15; i >= 12; i--) {
