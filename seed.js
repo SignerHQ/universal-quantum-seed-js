@@ -644,10 +644,9 @@ async function getSeedAsync(words, passphrase = "") {
 }
 
 function getProfile(masterKey, profilePassword) {
-  if (!profilePassword) return masterKey;
   // NFKC normalization prevents cross-platform derivation differences
   // (e.g., macOS NFD vs Windows NFC for accented characters)
-  const normalizedPw = profilePassword.normalize("NFKC");
+  const normalizedPw = (profilePassword == null ? "" : String(profilePassword)).normalize("NFKC");
   const payload = concatBytes(DOMAIN, toBytes("-profile"), toBytes(normalizedPw));
   const derived = hmacSha512(masterKey, payload);
   zeroize(payload);

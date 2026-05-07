@@ -14,7 +14,8 @@
     "README.md"
   ],
   "scripts": {
-    "compile": "python tools/compile-js.py"
+    "compile": "python tools/compile-js.py",
+    "test": "node tools/test.js && node tools/kat-test.js"
   },
   "keywords": [
     "quantum",
